@@ -63,6 +63,11 @@ class AgentLensConfig:
     # Model risk tier — RBI MRM June 2026
     # Tier 1: High-risk (credit, fraud, AML), Tier 2: Medium, Tier 3: Low
     default_model_risk_tier: int = 2
+    # Named AI Officer — required by SEBI AI/ML 2025 and RBI FREE-AI Governance Pillar
+    ai_officer_name: Optional[str] = None
+    ai_officer_email: Optional[str] = None
+    # Internal model inventory reference — RBI MRM 2026
+    model_inventory_ref: Optional[str] = None
 
     def is_rbi_regulated(self) -> bool:
         return self.entity_type in [

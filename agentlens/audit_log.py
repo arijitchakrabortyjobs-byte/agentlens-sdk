@@ -43,6 +43,12 @@ class EventType(str, Enum):
     GUARDRAIL_TRIGGERED  = "agent.guardrail_triggered"
     AGENT_END            = "agent.end"
     ERROR                = "agent.error"
+    # Chat session events
+    SESSION_START        = "chat.session_start"
+    TURN_USER            = "chat.turn_user"
+    TURN_ASSISTANT       = "chat.turn_assistant"
+    GUARDRAIL_CHECK      = "chat.guardrail_check"
+    SESSION_END          = "chat.session_end"
 
 
 class RiskTier(int, Enum):
