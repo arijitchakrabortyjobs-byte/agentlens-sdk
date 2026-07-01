@@ -1,3 +1,5 @@
+__version__ = "0.1.0"
+
 from .tracer import AuditTracer, AgentSpan
 from .config import AgentLensConfig
 from .audit_log import AuditLog, AuditEvent, RiskTier, EventType
