@@ -46,15 +46,17 @@ EXPORT_PATH = "/tmp/agentlens_repl_audit.json"
 # (messages: list[dict], system: str) -> (text: str, input_tok: int, out_tok: int)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def make_ollama_adapter(model: str = "llama3.2", host: str = "http://localhost:11434"):
+def make_ollama_adapter(model: str = "llama3.2:1b", host: str = "http://localhost:11434"):
     """
-    Calls a locally running Ollama instance — completely free, no account needed.
-    Install: brew install ollama
-    Start:   ollama serve   (runs in background automatically after install)
-    Model:   ollama pull llama3.2
+    Calls a locally running Ollama instance using the native /api/chat endpoint
+    with streaming — works reliably with all models including thinking models.
+
+    Recommended fast models (pull with: ollama pull <name>):
+      llama3.2:1b   — 1.3 GB, very fast on CPU
+      llama3.2      — 2.0 GB, good quality
+      mistral       — 4.1 GB, excellent quality
     """
     def adapter(messages, system=""):
-        # Build payload: Ollama uses OpenAI-compatible /v1/chat/completions
         all_messages = []
         if system:
             all_messages.append({"role": "system", "content": system})
@@ -63,28 +65,49 @@ def make_ollama_adapter(model: str = "llama3.2", host: str = "http://localhost:1
         payload = json.dumps({
             "model": model,
             "messages": all_messages,
-            "stream": False,
+            "stream": True,
+            "think": False,       # disable extended thinking on models that support it
+            "options": {"num_predict": 512},
         }).encode()
 
         req = urllib.request.Request(
-            f"{host}/v1/chat/completions",
+            f"{host}/api/chat",
             data=payload,
             headers={"Content-Type": "application/json"},
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                data = json.loads(resp.read())
-            text = data["choices"][0]["message"]["content"]
-            usage = data.get("usage", {})
-            return text, usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
+            tokens_in, tokens_out = 0, 0
+            chunks = []
+            # Stream line by line — each line is a JSON object
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                for raw_line in resp:
+                    line = raw_line.decode().strip()
+                    if not line:
+                        continue
+                    obj = json.loads(line)
+                    content = obj.get("message", {}).get("content", "")
+                    if content:
+                        chunks.append(content)
+                    if obj.get("done"):
+                        tokens_in = obj.get("prompt_eval_count", 0)
+                        tokens_out = obj.get("eval_count", 0)
+                        break
+            return "".join(chunks), tokens_in, tokens_out
+
         except Exception as e:
-            if "Connection refused" in str(e) or "refused" in str(e).lower():
+            err = str(e)
+            if "Connection refused" in err or "refused" in err.lower():
                 raise RuntimeError(
-                    f"\n\n  Ollama is not running. Start it with:\n"
+                    f"\n\n  Ollama is not running. Fix:\n"
                     f"    ollama serve\n"
-                    f"  And pull the model:\n"
-                    f"    ollama pull {model}\n"
+                ) from e
+            if "timed out" in err.lower():
+                raise RuntimeError(
+                    f"\n\n  Ollama timed out. The model '{model}' may be too large for your hardware.\n"
+                    f"  Try a smaller model:\n"
+                    f"    ollama pull llama3.2:1b\n"
+                    f"    python examples/chat_repl.py --ollama llama3.2:1b\n"
                 ) from e
             raise
 
