@@ -96,30 +96,102 @@ def make_claude_adapter(api_key: str, model: str):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Mock adapter — realistic pre-scripted responses, no API key needed.
+# Identical call signature to make_claude_adapter — swap in/out freely.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_MOCK_RESPONSES = [
+    (
+        "Thank you for reaching out to SuryaFinance! I'm an AI assistant here to help you "
+        "with your loan enquiry. For a ₹5 lakh personal loan, you would generally need a "
+        "stable monthly income (typically ₹20,000+), a CIBIL score of 700 or above, and "
+        "at least 1 year of continuous employment. A final eligibility decision will be "
+        "made by one of our human credit officers after reviewing your application. "
+        "Would you like to know more about the specific criteria?",
+        312, 98
+    ),
+    (
+        "Great — with a monthly income of ₹60,000 and 3 years of employment, you look "
+        "like a strong candidate! Our typical eligibility criteria for a ₹5 lakh loan are: "
+        "(1) CIBIL score ≥ 700, (2) Debt-to-income ratio below 50%, meaning your total "
+        "EMIs should not exceed ₹30,000/month, (3) Minimum 1 year at current employer. "
+        "Your income comfortably meets criterion (2). A credit officer will verify your "
+        "CIBIL score and employment proof before final approval.",
+        398, 124
+    ),
+    (
+        "For a ₹5 lakh loan over 36 months, here's an indicative EMI estimate: "
+        "At 14% annual interest rate: approximately ₹17,090/month. "
+        "At 16% annual interest rate: approximately ₹17,580/month. "
+        "Your actual rate will depend on your CIBIL score, employer category, and "
+        "our credit assessment. These are indicative figures only — the final rate "
+        "will be confirmed by our credit officer. Your income of ₹60,000/month means "
+        "an EMI of ~₹17,000 is well within the 50% DTI guideline.",
+        421, 137
+    ),
+    (
+        "For a personal loan application at SuryaFinance, you will need: "
+        "Identity Proof: PAN card (mandatory), Aadhaar card. "
+        "Address Proof: Aadhaar, utility bill, or rental agreement. "
+        "Income Proof: Last 3 months' salary slips, last 6 months' bank statements. "
+        "Employment Proof: Offer letter or employment certificate. "
+        "Photograph: 2 recent passport-size photos. "
+        "Please submit these to your nearest SuryaFinance branch or upload via our app. "
+        "Our team will process your application within 2-3 business days. "
+        "Is there anything else I can help you with?",
+        445, 152
+    ),
+]
+
+
+def make_mock_adapter():
+    """
+    Returns a mock adapter that serves pre-scripted realistic responses.
+    Identical interface to make_claude_adapter — no API key needed.
+    Use this for demos, testing, and when credits are unavailable.
+    """
+    import time
+    call_count = [0]
+
+    def adapter(messages, system=""):
+        idx = min(call_count[0], len(_MOCK_RESPONSES) - 1)
+        text, input_tok, output_tok = _MOCK_RESPONSES[idx]
+        call_count[0] += 1
+        time.sleep(0.08)   # Simulate realistic network latency
+        return text, input_tok, output_tok
+
+    return adapter
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # DEMO
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_demo():
     api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        print("\nERROR: ANTHROPIC_API_KEY environment variable not set.")
-        print("       export ANTHROPIC_API_KEY=your_key_here")
-        sys.exit(1)
-
     MODEL_ID = "claude-haiku-4-5"
     MODEL_VERSION = "claude-haiku-4-5-20251001"
+
+    # Auto-detect: use real Claude if key is present, otherwise mock
+    if api_key:
+        claude_adapter = make_claude_adapter(api_key, MODEL_ID)
+        adapter_label = f"Claude API ({MODEL_ID})"
+    else:
+        claude_adapter = make_mock_adapter()
+        adapter_label = f"Mock adapter — realistic pre-scripted responses (no API key needed)"
+        MODEL_ID = "claude-haiku-4-5-mock"
 
     if RICH:
         console.print(Panel.fit(
             "[bold white]AgentLens — Live Claude Chat Audit Demo[/bold white]\n"
             "[dim]NBFC Customer Service Agent — Loan Eligibility Queries[/dim]\n"
-            f"[dim]Model: {MODEL_ID} | Provider: Anthropic[/dim]",
+            f"[dim]{adapter_label}[/dim]",
             border_style="green",
         ))
     else:
         print("\n" + "="*70)
         print("  AgentLens — Live Claude Chat Audit Demo")
-        print(f"  Model: {MODEL_ID}")
+        print(f"  {adapter_label}")
         print("="*70)
 
     # ── STEP 1: Configure ───────────────────────────────────────────────────
@@ -193,8 +265,6 @@ You represent an AI system operating under RBI FREE-AI Framework guidelines."""
 
     # ── STEP 5: Live chat session ───────────────────────────────────────────
     section("STEP 4 — Live Chat Session with Audit Tracing")
-
-    claude_adapter = make_claude_adapter(api_key, MODEL_ID)
 
     # Simulated customer conversation about loan eligibility
     conversation = [
