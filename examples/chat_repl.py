@@ -3,28 +3,34 @@ AgentLens — Interactive Chat REPL
 ===================================
 Type your own messages. Every turn is audited live.
 Type 'report' to see the full compliance report.
+Type 'audit' to see the raw event chain.
 Type 'quit' or Ctrl+C to exit and export the JSON audit trail.
 
-Run:
-    # With real Claude (needs ANTHROPIC_API_KEY with credits):
-    ANTHROPIC_API_KEY=sk-ant-... python examples/chat_repl.py
+Provider options (pick one — all free):
 
-    # Without API key (uses mock responses):
-    python examples/chat_repl.py
+  1. Ollama  — local models, completely free, no account needed
+     brew install ollama
+     ollama pull llama3.2          # or mistral, phi3, gemma2, etc.
+     python examples/chat_repl.py --ollama llama3.2
+
+  2. Groq    — free cloud API (fast), needs a free account at groq.com
+     python examples/chat_repl.py --groq YOUR_GROQ_KEY
+
+  3. Mock    — pre-scripted responses, no install needed (default)
+     python examples/chat_repl.py
+
+  4. Claude  — needs paid credits
+     ANTHROPIC_API_KEY=sk-ant-... python examples/chat_repl.py --claude
 """
 
 import os
 import sys
 import json
 import time
+import argparse
+import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-try:
-    import anthropic
-    ANTHROPIC_AVAILABLE = True
-except ImportError:
-    ANTHROPIC_AVAILABLE = False
 
 from agentlens import (
     AgentLensConfig, PolicyEngine, RiskTier,
@@ -34,52 +40,160 @@ from agentlens.config import EntityType, RegulatoryFramework
 
 EXPORT_PATH = "/tmp/agentlens_repl_audit.json"
 
-# ── Adapters ─────────────────────────────────────────────────────────────────
 
-def make_claude_adapter(api_key, model):
-    client = anthropic.Anthropic(api_key=api_key)
+# ─────────────────────────────────────────────────────────────────────────────
+# Adapters  (all share the same signature)
+# (messages: list[dict], system: str) -> (text: str, input_tok: int, out_tok: int)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def make_ollama_adapter(model: str = "llama3.2", host: str = "http://localhost:11434"):
+    """
+    Calls a locally running Ollama instance — completely free, no account needed.
+    Install: brew install ollama
+    Start:   ollama serve   (runs in background automatically after install)
+    Model:   ollama pull llama3.2
+    """
     def adapter(messages, system=""):
-        r = client.messages.create(model=model, max_tokens=1024, system=system, messages=messages)
-        return r.content[0].text, r.usage.input_tokens, r.usage.output_tokens
+        # Build payload: Ollama uses OpenAI-compatible /v1/chat/completions
+        all_messages = []
+        if system:
+            all_messages.append({"role": "system", "content": system})
+        all_messages.extend(messages)
+
+        payload = json.dumps({
+            "model": model,
+            "messages": all_messages,
+            "stream": False,
+        }).encode()
+
+        req = urllib.request.Request(
+            f"{host}/v1/chat/completions",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read())
+            text = data["choices"][0]["message"]["content"]
+            usage = data.get("usage", {})
+            return text, usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
+        except Exception as e:
+            if "Connection refused" in str(e) or "refused" in str(e).lower():
+                raise RuntimeError(
+                    f"\n\n  Ollama is not running. Start it with:\n"
+                    f"    ollama serve\n"
+                    f"  And pull the model:\n"
+                    f"    ollama pull {model}\n"
+                ) from e
+            raise
+
+    return adapter
+
+
+def make_groq_adapter(api_key: str, model: str = "llama-3.1-8b-instant"):
+    """
+    Calls Groq's free cloud API — very fast inference.
+    Free account at: https://console.groq.com
+    Free models: llama-3.1-8b-instant, llama-3.3-70b-versatile, mixtral-8x7b-32768
+    """
+    def adapter(messages, system=""):
+        all_messages = []
+        if system:
+            all_messages.append({"role": "system", "content": system})
+        all_messages.extend(messages)
+
+        payload = json.dumps({
+            "model": model,
+            "messages": all_messages,
+            "max_tokens": 1024,
+        }).encode()
+
+        req = urllib.request.Request(
+            "https://api.groq.com/openai/v1/chat/completions",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read())
+        text = data["choices"][0]["message"]["content"]
+        usage = data.get("usage", {})
+        return text, usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)
+
+    return adapter
+
+
+def make_claude_adapter(api_key: str, model: str = "claude-haiku-4-5"):
+    """Real Claude API — requires paid credits."""
+    try:
+        import anthropic
+    except ImportError:
+        raise RuntimeError("pip install anthropic")
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    def adapter(messages, system=""):
+        try:
+            r = client.messages.create(
+                model=model, max_tokens=1024, system=system, messages=messages
+            )
+            return r.content[0].text, r.usage.input_tokens, r.usage.output_tokens
+        except Exception as e:
+            if "credit balance is too low" in str(e):
+                raise RuntimeError(
+                    "\n\n  Anthropic account has no credits.\n"
+                    "  Use --ollama or --groq instead (both free).\n"
+                    "  See: python examples/chat_repl.py --help\n"
+                ) from e
+            raise
+
     return adapter
 
 
 def make_mock_adapter():
-    """Rotates through generic helpful responses when no API key is available."""
+    """Pre-scripted realistic responses — no install, no account, no internet."""
     replies = [
-        "Thank you for your question! I'm an AI assistant for SuryaFinance. "
+        "Thank you for reaching out to SuryaFinance! I'm an AI assistant here to help. "
         "For a personal loan, you typically need a CIBIL score of 700+, monthly income ≥ ₹20,000, "
-        "and at least 1 year of employment. A human credit officer makes the final decision.",
+        "and at least 1 year of continuous employment. Final eligibility is confirmed by a human credit officer.",
 
-        "That's a good question. Based on what you've shared, you appear to meet our general "
-        "eligibility criteria. However, the final assessment depends on your full credit profile, "
-        "which our credit officer will review. Shall I explain the application process?",
+        "Based on what you've shared, you appear to be a strong candidate. "
+        "Key criteria: (1) CIBIL score ≥ 700, (2) Total EMIs ≤ 50% of monthly income, "
+        "(3) Minimum 1 year at current employer. A credit officer will review your full application.",
 
-        "For documentation, you'll need: PAN card, Aadhaar, last 3 months' salary slips, "
-        "6 months' bank statements, and employment certificate. You can submit these at any "
-        "SuryaFinance branch or via our app.",
+        "For a ₹5 lakh loan over 36 months, indicative EMI is approximately ₹17,090/month at 14% p.a. "
+        "or ₹17,580/month at 16% p.a. Your actual rate depends on your CIBIL score and profile. "
+        "These are indicative figures — final rate confirmed by our credit officer.",
 
-        "I understand your concern. While I can provide general information, specific credit "
-        "decisions are made by our human credit officers to ensure fairness and accuracy. "
-        "Would you like me to connect you with a credit officer?",
+        "Documents required: PAN card, Aadhaar, last 3 months' salary slips, 6 months' bank statements, "
+        "employment certificate. Submit at any SuryaFinance branch or via our app. "
+        "Processing takes 2–3 business days.",
 
-        "Is there anything else I can help you with today? Remember, this is an AI assistant "
-        "and for any binding commitments, please speak with our human team.",
+        "I'm an AI assistant, so I can only provide general information. "
+        "For a personalised assessment or to start your application, please visit our nearest branch "
+        "or call 1800-XXX-XXXX to speak with a human credit officer.",
     ]
     idx = [0]
+
     def adapter(messages, system=""):
         text = replies[idx[0] % len(replies)]
         idx[0] += 1
         time.sleep(0.05)
-        return text, len(" ".join(m["content"] for m in messages)) // 4, len(text) // 4
+        input_chars = sum(len(m["content"]) for m in messages)
+        return text, input_chars // 4, len(text) // 4
+
     return adapter
 
-# ── Setup ─────────────────────────────────────────────────────────────────────
 
-def build_tracer():
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    use_live = bool(api_key and ANTHROPIC_AVAILABLE)
+# ─────────────────────────────────────────────────────────────────────────────
+# Tracer setup
+# ─────────────────────────────────────────────────────────────────────────────
 
+def build_tracer(adapter, model_id: str, provider: str):
     config = AgentLensConfig(
         entity_name="SuryaFinance NBFC Ltd.",
         entity_type=EntityType.NBFC,
@@ -97,9 +211,9 @@ def build_tracer():
     )
 
     model_card = ModelCard(
-        model_id="claude-haiku-4-5" if use_live else "claude-haiku-4-5-mock",
-        model_version="claude-haiku-4-5-20251001",
-        provider="anthropic",
+        model_id=model_id,
+        model_version=model_id,
+        provider=provider,
         risk_tier=RiskTier.MEDIUM,
         intended_use="customer_service_loan_enquiry",
         inventory_id="INV-2026-CS-001",
@@ -113,16 +227,14 @@ def build_tracer():
 
     system_prompt = (
         "You are a helpful customer service AI assistant for SuryaFinance NBFC Ltd., "
-        "an RBI-regulated non-banking financial company in India. Help customers understand "
-        "personal loan eligibility, EMI calculations, and documentation. "
-        "Never ask for or repeat PAN, Aadhaar, or account numbers. "
-        "Always remind customers that final credit decisions are made by human officers. "
+        "an RBI-regulated NBFC in India. Help customers with personal loan eligibility, "
+        "EMI calculations, and documentation requirements. "
+        "Do NOT ask for or repeat PAN, Aadhaar, or account numbers. "
+        "Always clarify that final credit decisions are made by human officers. "
         "Disclose that you are an AI when asked."
     )
 
-    adapter = make_claude_adapter(api_key, model_card.model_id) if use_live else make_mock_adapter()
-
-    tracer = ChatSessionTracer(
+    return ChatSessionTracer(
         config=config,
         model_card=model_card,
         llm_adapter=adapter,
@@ -132,38 +244,84 @@ def build_tracer():
         session_purpose="interactive_loan_enquiry",
     )
 
-    return tracer, use_live
 
-# ── REPL ─────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# REPL
+# ─────────────────────────────────────────────────────────────────────────────
 
 def print_turn_audit(turn):
-    print(f"\n  ┌─ Audit: Turn {turn.turn_index} {'─'*46}")
+    print(f"\n  ┌─ Audit: Turn {turn.turn_index} {'─'*44}")
     print(f"  │  Input hash  : {turn.user_input_hash[:32]}...")
     print(f"  │  Output hash : {turn.assistant_output_hash[:32]}...")
     print(f"  │  Latency     : {turn.latency_ms} ms")
     print(f"  │  Tokens      : {turn.input_tokens} in / {turn.output_tokens} out")
-    print(f"  │  Guardrail   : {'✅ PASS' if turn.guardrail_passed else '⚠  FAIL — ' + str(turn.guardrail_rules_failed)}")
-    print(f"  └{'─'*51}")
+    status = "✅ PASS" if turn.guardrail_passed else f"⚠  FAIL — {turn.guardrail_rules_failed}"
+    print(f"  │  Guardrail   : {status}")
+    print(f"  └{'─'*49}")
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="AgentLens Interactive Chat REPL")
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--ollama", metavar="MODEL", nargs="?", const="llama3.2",
+                       help="Use local Ollama (default model: llama3.2)")
+    group.add_argument("--groq", metavar="API_KEY",
+                       help="Use Groq free cloud API (get key at console.groq.com)")
+    group.add_argument("--claude", action="store_true",
+                       help="Use Claude API (needs ANTHROPIC_API_KEY with credits)")
+    group.add_argument("--mock", action="store_true",
+                       help="Use pre-scripted mock responses (default, no setup needed)")
+    p.add_argument("--groq-model", default="llama-3.1-8b-instant",
+                   help="Groq model to use (default: llama-3.1-8b-instant)")
+    return p.parse_args()
 
 
 def run_repl():
+    args = parse_args()
+
+    if args.ollama:
+        model = args.ollama
+        adapter = make_ollama_adapter(model)
+        mode_label = f"Ollama local  ({model})"
+        provider = "ollama"
+    elif args.groq:
+        model = args.groq_model
+        adapter = make_groq_adapter(args.groq, model)
+        mode_label = f"Groq free API ({model})"
+        provider = "groq"
+    elif args.claude:
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            print("\nERROR: --claude requires ANTHROPIC_API_KEY to be set.")
+            sys.exit(1)
+        adapter = make_claude_adapter(api_key)
+        mode_label = "Claude API    (claude-haiku-4-5)"
+        provider = "anthropic"
+        model = "claude-haiku-4-5"
+    else:
+        adapter = make_mock_adapter()
+        mode_label = "Mock          (pre-scripted, no setup needed)"
+        provider = "mock"
+        model = "mock-assistant"
+
     print("\n" + "="*60)
     print("  AgentLens Interactive Chat REPL")
     print("  Every message is audited in real time.")
     print()
-    print("  Commands:")
-    print("    report  — show full 7-section compliance report")
-    print("    audit   — show audit trail so far (compact)")
-    print("    quit    — exit and export JSON report")
+    print("  Commands:  report | audit | quit")
     print("="*60)
 
-    tracer, use_live = build_tracer()
-    mode = "Claude API (live)" if use_live else "Mock responses (no API key)"
-    print(f"\n  Mode    : {mode}")
+    tracer = build_tracer(adapter, model, provider)
+
+    print(f"\n  Mode    : {mode_label}")
     print(f"  Entity  : {tracer.config.entity_name}")
-    print(f"  Session : {tracer.session_id[:20]}...")
+    print(f"  Session : {tracer.session_id[:24]}...")
     print(f"  Export  : {EXPORT_PATH}")
-    print("\n  Type your message below. The agent is an NBFC loan assistant.\n")
+    print()
+    print("  Ask anything about loans, EMIs, or eligibility.")
+    print("  Type 'audit' to see the live event chain.")
+    print("  Type 'report' for the full compliance report.")
+    print("  Type 'quit' to exit.\n")
 
     try:
         while True:
@@ -175,39 +333,42 @@ def run_repl():
             if not user_input:
                 continue
 
-            if user_input.lower() == "quit":
+            cmd = user_input.lower()
+
+            if cmd == "quit":
                 break
 
-            if user_input.lower() == "report":
+            if cmd == "report":
                 tracer.close()
-                report = LiveSessionReport(tracer)
-                print(report.to_console())
-                # Re-open isn't possible cleanly; just continue showing report
-                print("\n  (Session closed for report. Type 'quit' to exit.)")
+                print(LiveSessionReport(tracer).to_console())
                 break
 
-            if user_input.lower() == "audit":
+            if cmd == "audit":
                 events = tracer.audit_log.get_events()
-                print(f"\n  {'─'*56}")
-                print(f"  Audit trail — {len(events)} events, chain intact: {tracer.audit_log.verify_integrity()}")
+                chain_ok = tracer.audit_log.verify_integrity()
+                print(f"\n  {'─'*54}")
+                print(f"  {len(events)} events  |  chain intact: {'✅ YES' if chain_ok else '⚠ NO'}")
                 for e in events:
-                    print(f"  [{e.event_type.value:28s}] {e.event_hash[:16]}...")
-                print(f"  {'─'*56}\n")
+                    print(f"  [{e.event_type.value:28s}] {e.event_hash[:18]}...")
+                print(f"  {'─'*54}\n")
                 continue
 
-            # Normal message — send and audit
-            response = tracer.send(
-                user_message=user_input,
-                human_readable_summary=f"Customer enquiry (turn {len(tracer.turns)+1}): general loan information provided.",
-                context={
-                    "ai_disclosed_to_user": True,
-                    "human_escalation_path_defined": True,
-                    "pii_masked": True,
-                    "consent_ref": tracer.consent_ref,
-                    "has_human_summary": True,
-                    "policy_ref": tracer.config.board_policy_ref,
-                },
-            )
+            try:
+                response = tracer.send(
+                    user_message=user_input,
+                    human_readable_summary=f"Customer enquiry turn {len(tracer.turns)+1}: general loan information provided.",
+                    context={
+                        "ai_disclosed_to_user": True,
+                        "human_escalation_path_defined": True,
+                        "pii_masked": True,
+                        "consent_ref": tracer.consent_ref,
+                        "has_human_summary": True,
+                        "policy_ref": tracer.config.board_policy_ref,
+                    },
+                )
+            except RuntimeError as e:
+                print(str(e))
+                break
 
             print(f"\nAgent: {response}\n")
             print_turn_audit(tracer.turns[-1])
@@ -216,24 +377,16 @@ def run_repl():
     except KeyboardInterrupt:
         print("\n\n  Interrupted.")
 
-    # Always close and export on exit
     tracer.close()
     report = LiveSessionReport(tracer)
     with open(EXPORT_PATH, "w") as f:
         f.write(report.to_json())
 
-    summary = tracer.get_session_summary()
+    s = tracer.get_session_summary()
     print("\n" + "="*60)
-    print("  Session closed.")
-    print(f"  Turns          : {summary['total_turns']}")
-    print(f"  Total tokens   : {summary['total_input_tokens']} in / {summary['total_output_tokens']} out")
-    print(f"  Guardrail fails: {summary['guardrail_failures']}")
-    print(f"  Chain intact   : {'✅ YES' if summary['chain_intact'] else '⚠ NO'}")
-    print(f"  JSON report    : {EXPORT_PATH}")
-    print("="*60)
-    print("\n  Run this to see the full 7-section report:")
-    print(f"    python -c \"import json; from agentlens.live_report import *; print(open('{EXPORT_PATH}').read())\"")
-    print()
+    print(f"  Session closed  |  Turns: {s['total_turns']}  |  Chain: {'✅' if s['chain_intact'] else '⚠'}")
+    print(f"  JSON report → {EXPORT_PATH}")
+    print("="*60 + "\n")
 
 
 if __name__ == "__main__":
