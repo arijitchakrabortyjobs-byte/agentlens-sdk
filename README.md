@@ -119,7 +119,12 @@ The demo simulates a full NBFC credit decisioning workflow with:
 | RBI Draft Model Risk Management | June 2026 | ✅ Aligned |
 | SEBI AI/ML Guidelines | June 2025 | ✅ Aligned |
 | DPDP Act 2023 | 2023 | ✅ PII masking + data minimisation |
+| Singapore IMDA MGF v1.5 | January 2026 | ◐ Partial (gaps: agent identity, action scope) |
+| EU AI Act | 2024 | ◐ Partial (high-risk deadline Dec 2027) |
+| UAE DIFC Regulation 10 | 2026 | ◐ Partial |
 | IRDAI AI Governance | 2025 | 🔄 Coming soon |
+
+For the full global coverage analysis across 10 frameworks and 8 capability dimensions, see [GLOBAL_AI_GOVERNANCE_COVERAGE.md](GLOBAL_AI_GOVERNANCE_COVERAGE.md).
 
 ---
 
