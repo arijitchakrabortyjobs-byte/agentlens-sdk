@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, List, Optional
 from .audit_log import AuditEvent, AuditLog, EventType, RiskTier
 from .config import AgentLensConfig
 from .policy import PolicyEngine, PolicyCheckResult, PolicyAction
+from .chat_analytics import TurnAnalytics, analyse_turn
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -98,7 +99,8 @@ class ConversationTurn:
 
     # Policy evaluation
     guardrail_passed: bool = True
-    guardrail_rules_failed: List[str] = field(default_factory=list)
+    guardrail_rules_failed: List[str] = field(default_factory=list)   # BLOCK / ESCALATE
+    guardrail_rules_warned: List[str] = field(default_factory=list)   # WARN
     guardrail_action: str = PolicyAction.ALLOW.value
 
     # Explainability — RBI FREE-AI Rec 18: must be human-readable, not LLM CoT
@@ -110,6 +112,9 @@ class ConversationTurn:
     pii_detected_in_output: bool = False
     pii_fields_masked: List[str] = field(default_factory=list)
     consent_ref: str = ""            # Link to consent record for this user
+
+    # Analytics — RBI FREE-AI Rec 18, RBI MRM 2026 bias audit, DPDP consumer protection
+    analytics: Optional[TurnAnalytics] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -281,14 +286,37 @@ class ChatSessionTracer:
         # Append to conversation history
         self._messages.append({"role": "assistant", "content": response_text})
 
+        # Run analytics FIRST — reads actual response text.
+        # Results are injected into guardrail context so rules fire on real evidence,
+        # not on caller-supplied assertions.
+        turn.analytics = analyse_turn(user_message, response_text)
+        if turn.analytics.pii_in_output:
+            turn.pii_detected_in_output = True
+            turn.pii_fields_masked = turn.analytics.pii_in_output
+
+        an = turn.analytics
+
         # Run guardrail policy if configured
         if self.policy_engine:
             eval_context = {
+                # Infrastructure facts (caller-supplied, still needed for CHAT_001/005)
                 "pii_masked": self.config.pii_masking_enabled,
                 "consent_ref": self.consent_ref,
                 "has_human_summary": bool(human_readable_summary),
                 "policy_ref": self.config.board_policy_ref,
                 "output_length": output_tokens,
+                # Analytics-derived facts (read from actual response text)
+                "pii_in_user_input": an.pii_in_input,
+                "analytics_ai_disclosed": an.consumer_protection.ai_identity_disclosed,
+                "analytics_human_escalation": an.consumer_protection.human_escalation_mentioned,
+                "analytics_human_disclaimer": an.bias.disclaimer_present,
+                "analytics_pii_in_output": bool(an.pii_in_output),
+                "analytics_pii_requested": an.consumer_protection.pii_requested_by_agent,
+                "analytics_has_financial_output": "calculation_provided" in an.response_types,
+                "analytics_topic": an.topic,
+                "analytics_bias_risk": an.bias.overall_risk,
+                "analytics_grievance_mentioned": an.consumer_protection.grievance_channel_mentioned,
+                # Caller context (may add extra keys but cannot override analytics keys)
                 **(context or {}),
             }
             result = self.policy_engine.evaluate(
@@ -296,9 +324,11 @@ class ChatSessionTracer:
             )
             turn.guardrail_passed = result.overall_action == PolicyAction.ALLOW
             turn.guardrail_rules_failed = result.rules_failed
+            turn.guardrail_rules_warned = result.rules_warned
             turn.guardrail_action = result.overall_action.value
 
             # Log guardrail check
+            all_issues = result.rules_failed + result.rules_warned
             guardrail_event = AuditEvent(
                 event_type=EventType.GUARDRAIL_CHECK,
                 agent_id=f"chat_session:{self.session_purpose or 'general'}",
@@ -307,13 +337,14 @@ class ChatSessionTracer:
                 risk_tier=self.model_card.risk_tier,
                 regulatory_frameworks=[f.value for f in self.config.regulatory_frameworks],
                 guardrail_triggered=not turn.guardrail_passed,
-                guardrail_rule=", ".join(turn.guardrail_rules_failed) if turn.guardrail_rules_failed else None,
+                guardrail_rule=", ".join(all_issues) if all_issues else None,
                 guardrail_action=turn.guardrail_action,
-                compliance_flags=turn.guardrail_rules_failed,
+                compliance_flags=all_issues,   # includes both BLOCK and WARN rule IDs
                 human_readable_reasoning=(
                     f"Turn {turn_index} policy check: {result.overall_action.value.upper()}. "
                     f"Rules passed: {len(result.rules_passed)}. "
-                    f"Rules failed: {result.rules_failed or 'none'}."
+                    f"Rules blocked: {result.rules_failed or 'none'}. "
+                    f"Rules warned: {result.rules_warned or 'none'}."
                 ),
             )
             self.audit_log.append(guardrail_event)

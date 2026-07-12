@@ -6,8 +6,9 @@ from .audit_log import AuditLog, AuditEvent, RiskTier, EventType
 from .policy import PolicyEngine, PolicyRule, PolicyCheckResult, RBIPolicy, SEBIPolicy, PolicyAction
 from .report import ComplianceReporter
 from .chat_tracer import ChatSessionTracer, ModelCard, ConversationTurn
-from .chat_policy import ChatPolicy, detect_pii
+from .chat_policy import ChatPolicy, detect_pii, detect_pii_in_user_input
 from .live_report import LiveSessionReport
+from .chat_analytics import TurnAnalytics, analyse_turn
 
 __all__ = [
     "AuditTracer",
@@ -30,4 +31,6 @@ __all__ = [
     "ChatPolicy",
     "detect_pii",
     "LiveSessionReport",
+    "TurnAnalytics",
+    "analyse_turn",
 ]

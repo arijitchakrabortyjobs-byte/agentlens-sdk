@@ -252,9 +252,14 @@ def build_tracer(adapter, model_id: str, provider: str):
         "You are a helpful customer service AI assistant for SuryaFinance NBFC Ltd., "
         "an RBI-regulated NBFC in India. Help customers with personal loan eligibility, "
         "EMI calculations, and documentation requirements. "
-        "Do NOT ask for or repeat PAN, Aadhaar, or account numbers. "
-        "Always clarify that final credit decisions are made by human officers. "
-        "Disclose that you are an AI when asked."
+        "IMPORTANT RULES YOU MUST FOLLOW IN EVERY RESPONSE:\n"
+        "1. Always state that you are an AI assistant at the start of your first reply "
+        "and whenever a user asks if you are a bot or human.\n"
+        "2. For any eligibility or EMI question, always include: "
+        "'Final decisions are made by our human credit officers.'\n"
+        "3. Do NOT ask for or repeat PAN, Aadhaar, or account numbers.\n"
+        "4. When relevant, mention our grievance channel: call 1800-XXX-XXXX or "
+        "email grievance@suryafinance.in to reach a human officer."
     )
 
     return ChatSessionTracer(
@@ -273,14 +278,107 @@ def build_tracer(adapter, model_id: str, provider: str):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def print_turn_audit(turn):
-    print(f"\n  ┌─ Audit: Turn {turn.turn_index} {'─'*44}")
-    print(f"  │  Input hash  : {turn.user_input_hash[:32]}...")
-    print(f"  │  Output hash : {turn.assistant_output_hash[:32]}...")
-    print(f"  │  Latency     : {turn.latency_ms} ms")
-    print(f"  │  Tokens      : {turn.input_tokens} in / {turn.output_tokens} out")
-    status = "✅ PASS" if turn.guardrail_passed else f"⚠  FAIL — {turn.guardrail_rules_failed}"
-    print(f"  │  Guardrail   : {status}")
-    print(f"  └{'─'*49}")
+    W = 66
+    an = turn.analytics  # TurnAnalytics object
+
+    def row(label, value, flag=""):
+        pad = W - len(label) - len(str(value)) - len(flag) - 3
+        print(f"  │  {label}: {value}{' '*max(0,pad)}{flag}")
+
+    print(f"\n  ┌─ AgentLens Audit — Turn {turn.turn_index} {'─'*(W-27)}")
+
+    # ── IDENTITY ──────────────────────────────────────────────────────────────
+    print(f"  │")
+    print(f"  │  ● IDENTITY & TIMING                    [RBI MRM 2026 §4.1]")
+    row("  Turn ID      ", turn.turn_id[:20] + "...")
+    row("  Request UTC  ", turn.request_timestamp_utc_ms, "  (ms precision — SEBI AIML 2025)")
+    row("  Latency      ", f"{turn.latency_ms} ms")
+    row("  Model ID     ", turn.model_id)
+    row("  Model Version", turn.model_version)
+    row("  Tokens       ", f"{turn.input_tokens} in / {turn.output_tokens} out")
+
+    # ── INPUT / OUTPUT RECORD ─────────────────────────────────────────────────
+    print(f"  │")
+    print(f"  │  ● INPUT / OUTPUT RECORD                [DPDP Act 2023 §8]")
+    row("  Input hash   ", f"{turn.user_input_hash[:32]}...")
+    row("  Input chars  ", turn.user_input_length)
+    row("  Output hash  ", f"{turn.assistant_output_hash[:32]}...")
+    row("  Output chars ", turn.assistant_output_length)
+    pii_inp = an.pii_in_input if an else []
+    pii_out = an.pii_in_output if an else []
+    row("  PII in input ", pii_inp or "NONE ✅")
+    row("  PII in output", pii_out or "NONE ✅",
+        "  ⚠ REVIEW REQUIRED" if pii_out else "")
+
+    # ── TOPIC & RESPONSE CLASSIFICATION ──────────────────────────────────────
+    if an:
+        print(f"  │")
+        print(f"  │  ● TOPIC & RESPONSE                     [RBI FREE-AI Rec 18]")
+        row("  Topic        ", an.topic)
+        row("  Response type", ", ".join(an.response_types))
+        row("  Turn risk    ", an.risk_summary)
+
+    # ── EXPLAINABILITY ────────────────────────────────────────────────────────
+    print(f"  │")
+    print(f"  │  ● EXPLAINABILITY                        [RBI FREE-AI Rec 18]")
+    row("  Policy ref   ", turn.policy_ref or "⚠ NOT SET")
+    row("  Policy clause", turn.policy_clause or "⚠ NOT SET")
+    has_summary = bool(turn.human_readable_summary)
+    row("  Human summary", "✅ PROVIDED" if has_summary else "⚠ MISSING — required by RBI FREE-AI Rec 18")
+
+    # ── BIAS CHECK ────────────────────────────────────────────────────────────
+    if an and an.bias:
+        b = an.bias
+        print(f"  │")
+        print(f"  │  ● BIAS & AUTOMATION RISK CHECK         [RBI FREE-AI Rec 18]")
+        row("  Automation bias", f"{'⚠ HIGH RISK' if b.automation_bias_risk else '✅ NONE'}")
+        row("  Demo assumption", f"{'⚠ FLAGGED' if b.demographic_assumption else '✅ NONE'}")
+        row("  Human disclaimer", f"{'✅ PRESENT' if b.disclaimer_present else '⚠ ABSENT'}")
+        row("  Bias risk level", b.overall_risk)
+        if b.flags:
+            for flag in b.flags:
+                print(f"  │    ⚠ {flag}")
+
+    # ── CONSUMER PROTECTION ───────────────────────────────────────────────────
+    if an and an.consumer_protection:
+        cp = an.consumer_protection
+        print(f"  │")
+        print(f"  │  ● CONSUMER PROTECTION                  [RBI FREE-AI Rec 22/23]")
+        row("  AI disclosed ", f"{'✅ YES' if cp.ai_identity_disclosed else '⚠ NOT DETECTED'}")
+        row("  Human escalation", f"{'✅ MENTIONED' if cp.human_escalation_mentioned else '⚠ NOT MENTIONED'}")
+        row("  Grievance ch.", f"{'✅ MENTIONED' if cp.grievance_channel_mentioned else '—'}")
+        row("  PII requested", f"{'⚠ YES — NON-COMPLIANT' if cp.pii_requested_by_agent else '✅ NO'}")
+
+    # ── GUARDRAIL RULES ───────────────────────────────────────────────────────
+    print(f"  │")
+    print(f"  │  ● GUARDRAIL POLICY ENGINE              [DPDP 2023 + RBI FREE-AI]")
+    action = turn.guardrail_action.upper()
+    if turn.guardrail_passed:
+        status = "✅ ALL RULES PASSED"
+    elif turn.guardrail_rules_failed:
+        status = f"⛔ BLOCKED: {turn.guardrail_rules_failed}"
+    else:
+        status = f"⚠  WARNED: {turn.guardrail_rules_warned}"
+    row("  Status       ", status)
+    row("  Action       ", action)
+    if turn.guardrail_rules_warned:
+        row("  Warned rules ", ", ".join(turn.guardrail_rules_warned))
+    if turn.guardrail_rules_failed:
+        row("  Failed rules ", ", ".join(turn.guardrail_rules_failed))
+
+    # ── DPDP ─────────────────────────────────────────────────────────────────
+    print(f"  │")
+    print(f"  │  ● DPDP COMPLIANCE                      [DPDP Act 2023 §6/§8]")
+    row("  Consent ref  ", turn.consent_ref or "⚠ NOT SET")
+    row("  Data minimised", "✅ Hashes only — no raw content stored")
+
+    # ── CHAIN LINK ────────────────────────────────────────────────────────────
+    print(f"  │")
+    print(f"  │  ● TAMPER-EVIDENT CHAIN                 [RBI FREE-AI Pillar 6]")
+    row("  Turn ID      ", turn.turn_id[:24] + "...")
+    row("  Chain algo   ", "SHA-256 chained (blockchain-style)")
+
+    print(f"  └{'─'*(W+2)}")
 
 
 def parse_args():
@@ -381,12 +479,14 @@ def run_repl():
                     user_message=user_input,
                     human_readable_summary=f"Customer enquiry turn {len(tracer.turns)+1}: general loan information provided.",
                     context={
-                        "ai_disclosed_to_user": True,
-                        "human_escalation_path_defined": True,
+                        # Infrastructure facts only — do NOT assert analytics-derived values here.
+                        # Whether AI was disclosed, human escalation mentioned, etc. are now
+                        # detected from the actual response text by the analytics engine.
                         "pii_masked": True,
                         "consent_ref": tracer.consent_ref,
                         "has_human_summary": True,
                         "policy_ref": tracer.config.board_policy_ref,
+                        "human_escalation_path_defined": True,
                     },
                 )
             except RuntimeError as e:

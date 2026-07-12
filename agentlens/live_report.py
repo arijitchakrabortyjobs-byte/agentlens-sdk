@@ -74,22 +74,28 @@ class LiveSessionReport:
         """Turn-by-Turn Log — per-exchange hashes, latency, token counts."""
         turn_records = []
         for t in self.turns:
-            turn_records.append({
+            an = t.analytics
+            turn_rec = {
                 "turn": t.turn_index,
                 "turn_id": t.turn_id,
                 "user_input": {
                     "hash_sha256": t.user_input_hash,
                     "length_chars": t.user_input_length,
+                    "pii_detected": an.pii_in_input if an else [],
+                    "topic_classified": an.topic if an else "unknown",
                     "note": "Raw content not stored — DPDP data minimisation",
                 },
                 "assistant_output": {
                     "hash_sha256": t.assistant_output_hash,
                     "length_chars": t.assistant_output_length,
+                    "pii_detected": an.pii_in_output if an else [],
+                    "response_types": an.response_types if an else [],
                     "note": "Raw content not stored — DPDP data minimisation",
                 },
                 "model": {
                     "model_id": t.model_id,
                     "model_version": t.model_version,
+                    "regulatory_ref": "RBI MRM 2026 — model version mandatory per decision",
                 },
                 "tokens": {
                     "input": t.input_tokens,
@@ -100,9 +106,31 @@ class LiveSessionReport:
                     "request_utc_ms": t.request_timestamp_utc_ms,
                     "response_utc_ms": t.response_timestamp_utc_ms,
                     "latency_ms": t.latency_ms,
+                    "precision": "millisecond — SEBI AIML 2025 requirement",
                 },
                 "guardrail_passed": t.guardrail_passed,
-            })
+                "guardrail_action": t.guardrail_action,
+                "guardrail_rules_failed": t.guardrail_rules_failed,
+                "turn_risk_summary": an.risk_summary if an else "UNKNOWN",
+            }
+            if an:
+                turn_rec["bias_check"] = {
+                    "automation_bias_risk": an.bias.automation_bias_risk,
+                    "demographic_assumption": an.bias.demographic_assumption,
+                    "human_disclaimer_present": an.bias.disclaimer_present,
+                    "overall_risk": an.bias.overall_risk,
+                    "flags": an.bias.flags,
+                    "regulatory_ref": "RBI FREE-AI Rec 18 — Bias Audit",
+                }
+                turn_rec["consumer_protection"] = {
+                    "ai_identity_disclosed": an.consumer_protection.ai_identity_disclosed,
+                    "human_escalation_mentioned": an.consumer_protection.human_escalation_mentioned,
+                    "grievance_channel_mentioned": an.consumer_protection.grievance_channel_mentioned,
+                    "pii_requested_by_agent": an.consumer_protection.pii_requested_by_agent,
+                    "flags": an.consumer_protection.flags,
+                    "regulatory_ref": "RBI FREE-AI Rec 22/23 — Consumer Protection",
+                }
+            turn_records.append(turn_rec)
 
         avg_latency = (
             sum(t.latency_ms for t in self.turns) / len(self.turns)
@@ -304,31 +332,83 @@ class LiveSessionReport:
         s6 = self._section_6_dpdp()
         s7 = self._section_7_model_card()
 
+        # Aggregate analytics across all turns
+        all_topics = []
+        bias_high = 0
+        cp_missing_disclosure = 0
+        cp_missing_escalation = 0
+        for t in self.turns:
+            if t.analytics:
+                all_topics.append(t.analytics.topic)
+                if t.analytics.bias and t.analytics.bias.overall_risk == "HIGH":
+                    bias_high += 1
+                if t.analytics.consumer_protection:
+                    if not t.analytics.consumer_protection.ai_identity_disclosed:
+                        cp_missing_disclosure += 1
+                    if not t.analytics.consumer_protection.human_escalation_mentioned:
+                        cp_missing_escalation += 1
+
         lines = [
             "=" * 70,
             "  AgentLens — Live Chat Session Audit Report",
-            f"  Entity  : {s1['entity']['name']} ({s1['entity']['type']})",
-            f"  AI Officer: {s1['governance']['ai_officer_name']}",
-            f"  Policy  : {s1['governance']['board_policy_ref']}",
-            f"  Session : {s1['session']['session_id'][:20]}...",
-            f"  Purpose : {s1['session']['session_purpose']}",
-            f"  Generated: {self._generated_at[:19]} UTC",
+            f"  Entity     : {s1['entity']['name']} ({s1['entity']['type']})",
+            f"  AI Officer : {s1['governance']['ai_officer_name']} <{s1['governance']['ai_officer_email']}>",
+            f"  Policy ref : {s1['governance']['board_policy_ref']}",
+            f"  Inv. ref   : {s1['governance']['model_inventory_ref']}",
+            f"  Session    : {s1['session']['session_id'][:20]}...",
+            f"  Purpose    : {s1['session']['session_purpose']}",
+            f"  Consent    : {s1['session']['consent_ref']}",
+            f"  Generated  : {self._generated_at[:19]} UTC",
+            f"  Frameworks : {', '.join(s1['regulatory_frameworks'])}",
             "=" * 70,
             "",
-            "── SECTION 1: SESSION SUMMARY ──────────────────────────────────────",
-            f"  Turns          : {s2['summary']['total_turns']}",
-            f"  Total tokens   : {s2['summary']['total_tokens']:,}",
-            f"  Avg latency    : {s2['summary']['avg_latency_ms']} ms",
-            f"  Guardrail fails: {s2['summary']['turns_with_guardrail_failure']}",
+            "── SEC 1  SESSION OVERVIEW ──────────────────────────────────────────",
+            f"  Turns            : {s2['summary']['total_turns']}",
+            f"  Total tokens     : {s2['summary']['total_tokens']:,}",
+            f"  Avg latency      : {s2['summary']['avg_latency_ms']} ms",
+            f"  Guardrail failures: {s2['summary']['turns_with_guardrail_failure']}",
             "",
-            "── SECTION 5: CHAIN INTEGRITY ──────────────────────────────────────",
-            f"  {s5['status']}",
-            f"  Total events chained: {s5['total_events']}",
+            "── SEC 2  PER-TURN LOG ──────────────────────────────────────────────",
+        ]
+        for t in s2["turns"]:
+            lines.append(f"")
+            lines.append(f"  Turn {t['turn']}  [{t['turn_id'][:16]}...]")
+            lines.append(f"    Timestamp (req) : {t['timing']['request_utc_ms']} ms UTC")
+            lines.append(f"    Latency         : {t['timing']['latency_ms']} ms")
+            lines.append(f"    Model           : {t['model']['model_id']} ({t['model']['model_version']})")
+            lines.append(f"    Tokens          : {t['tokens']['input']} in / {t['tokens']['output']} out")
+            lines.append(f"    Input hash      : {t['user_input']['hash_sha256'][:32]}...")
+            lines.append(f"    Output hash     : {t['assistant_output']['hash_sha256'][:32]}...")
+            lines.append(f"    Topic           : {t['user_input'].get('topic_classified','—')}")
+            lines.append(f"    Response type   : {', '.join(t['assistant_output'].get('response_types',['—']))}")
+            lines.append(f"    Turn risk       : {t.get('turn_risk_summary','—')}")
+            lines.append(f"    Guardrail       : {'✅ PASS' if t['guardrail_passed'] else '⚠ FAIL — '+str(t['guardrail_rules_failed'])}")
+            pii_o = t['assistant_output'].get('pii_detected', [])
+            lines.append(f"    PII in output   : {pii_o if pii_o else 'NONE ✅'}")
+            if "bias_check" in t:
+                b = t["bias_check"]
+                lines.append(f"    Bias risk       : {b['overall_risk']}  (auto-bias:{b['automation_bias_risk']} | disclaimer:{b['human_disclaimer_present']})")
+            if "consumer_protection" in t:
+                cp = t["consumer_protection"]
+                lines.append(f"    AI disclosed    : {'✅' if cp['ai_identity_disclosed'] else '⚠ NOT DETECTED'}")
+                lines.append(f"    Human escalation: {'✅' if cp['human_escalation_mentioned'] else '⚠ NOT MENTIONED'}")
+
+        lines += [
             "",
-            "── SECTION 4: GUARDRAIL STATUS ─────────────────────────────────────",
-            f"  Checks run   : {s4['summary']['total_checks']}",
-            f"  Failures     : {s4['summary']['total_failures']}",
-            f"  Status       : {s4['summary']['overall_status']}",
+            "── SEC 3  EXPLAINABILITY                         [RBI FREE-AI Rec 18]─",
+        ]
+        s3 = self._section_3_explainability()
+        lines.append(f"  Status : {s3['compliance_status']}")
+        for e in s3["turns"]:
+            lines.append(f"  Turn {e['turn']}  Clause: {e['policy_clause']}")
+            lines.append(f"         Summary: {(e['human_readable_summary'] or '⚠ MISSING')[:80]}")
+
+        lines += [
+            "",
+            "── SEC 4  GUARDRAIL LOG ─────────────────────────────────────────────",
+            f"  Checks run : {s4['summary']['total_checks']}",
+            f"  Failures   : {s4['summary']['total_failures']}",
+            f"  Status     : {s4['summary']['overall_status']}",
         ]
         if s4["checks"]:
             for check in s4["checks"]:
@@ -337,22 +417,32 @@ class LiveSessionReport:
 
         lines += [
             "",
-            "── SECTION 6: DPDP COMPLIANCE ──────────────────────────────────────",
-            f"  Consent ref    : {s6['consent']['consent_ref']}",
-            f"  Consent status : {s6['consent']['status']}",
-            f"  PII masking    : {'✅ ENABLED' if s6['data_minimisation']['pii_masking_enabled'] else '⚠ DISABLED'}",
-            f"  Raw content stored: {'No ✅' if not s6['data_minimisation']['raw_user_content_stored'] else '⚠ YES'}",
-            f"  PII in output  : {s6['pii_in_output']['status']}",
-            f"  Retention      : {s6['audit_retention']['configured_days']} days ({'✅' if s6['audit_retention']['compliant'] else '⚠ BELOW MINIMUM'})",
+            "── SEC 5  CHAIN INTEGRITY                    [RBI FREE-AI Pillar 6]──",
+            f"  {s5['status']}",
+            f"  Total events : {s5['total_events']}",
+            f"  Algorithm    : {s5['algorithm']}",
             "",
-            "── SECTION 7: RBI MRM MODEL CARD ───────────────────────────────────",
-            f"  Model          : {s7['model_card']['model_id']} v{s7['model_card']['model_version']}",
+            "── SEC 6  DPDP COMPLIANCE                        [DPDP Act 2023]──────",
+            f"  Consent ref       : {s6['consent']['consent_ref']}",
+            f"  Consent status    : {s6['consent']['status']}",
+            f"  PII masking       : {'✅ ENABLED' if s6['data_minimisation']['pii_masking_enabled'] else '⚠ DISABLED'}",
+            f"  Raw content stored: {'No ✅' if not s6['data_minimisation']['raw_user_content_stored'] else '⚠ YES'}",
+            f"  PII in output     : {s6['pii_in_output']['status']}",
+            f"  Retention days    : {s6['audit_retention']['configured_days']} ({'✅ compliant' if s6['audit_retention']['compliant'] else '⚠ BELOW MINIMUM 1825 days'})",
+            "",
+            "── SEC 7  RBI MRM MODEL CARD                     [RBI MRM 2026]───────",
+            f"  Model          : {s7['model_card']['model_id']}",
+            f"  Version        : {s7['model_card']['model_version']}",
             f"  Provider       : {s7['model_card']['provider']}",
             f"  Risk tier      : Tier {s7['model_card']['risk_tier']} ({s7['model_card']['risk_tier_label']})",
             f"  Intended use   : {s7['model_card']['intended_use']}",
-            f"  Inventory      : {s7['inventory_status']}",
+            f"  Inventory ref  : {s7['model_card']['inventory_id'] or '⚠ NOT SET'}",
+            f"  Inventory status: {s7['inventory_status']}",
             f"  Last validated : {s7['model_card']['last_validated_date'] or '⚠ NOT SET'}",
-            f"  Kill switch    : {s7['kill_switch_status']}",
+            f"  Kill switch    : {s7['kill_switch_status']}  (last tested: {s7['model_card']['kill_switch_last_tested'] or '⚠ NEVER'})",
+            f"  Vendor audit rights: {'✅ YES' if s7['model_card']['vendor_audit_rights'] else '⚠ NOT IN CONTRACT'}",
+            f"  Deployment env : {s7['model_card']['deployment_environment']}",
+            f"  Overall status : {s7['overall_status']}",
         ]
         if s7["compliance_gaps"]:
             lines.append("  Gaps:")
