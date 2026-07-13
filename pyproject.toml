@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentlens"
-version = "0.1.0"
+version = "0.2.0"
 description = "Compliance-grade audit, observability, and reasoning traceability for AI agents in regulated Indian enterprises"
 readme = "README.md"
 license = { text = "MIT" }
@@ -24,8 +24,32 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+# Core dev tools
 dev = ["pytest", "black", "ruff"]
+
+# Pretty terminal output for demos
 rich = ["rich>=13.0"]
+
+# Phase 0 — WORM storage adapters (install only what you use)
+s3   = ["boto3>=1.26"]                          # S3ObjectLockAdapter → AWS Mumbai
+azure = ["azure-storage-blob>=12.0"]            # AzureImmutableBlobAdapter → Central India
+
+# Phase 0 — OpenTelemetry export (Grafana / Datadog / Azure Monitor)
+otel = [
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.20",
+    "opentelemetry-exporter-otlp-proto-http>=1.20",
+]
+
+# Install everything
+all = [
+    "rich>=13.0",
+    "boto3>=1.26",
+    "azure-storage-blob>=12.0",
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.20",
+    "opentelemetry-exporter-otlp-proto-http>=1.20",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
