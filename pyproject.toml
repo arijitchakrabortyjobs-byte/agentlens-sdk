@@ -26,6 +26,8 @@ classifiers = [
 [project.optional-dependencies]
 # Core dev tools
 dev = ["pytest", "black", "ruff"]
+integration = ["pytest", "boto3>=1.26", "psycopg2-binary>=2.9", "requests>=2.31",
+               "opentelemetry-sdk>=1.20", "opentelemetry-exporter-otlp-proto-grpc>=1.20"]
 
 # Pretty terminal output for demos
 rich = ["rich>=13.0"]
@@ -58,6 +60,9 @@ include = ["agentlens*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+markers = [
+    "integration: requires live docker-compose stack (localstack, postgres, otel, vault)",
+]
 
 [tool.ruff]
 line-length = 100
