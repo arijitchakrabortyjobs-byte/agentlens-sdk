@@ -1,0 +1,274 @@
+# AgentLens — Full E2E Test Environment
+# Spins up real instances of every production system.
+# Run: docker compose -f infra/docker-compose.yml up -d
+# Stop: docker compose -f infra/docker-compose.yml down -v
+
+version: "3.9"
+
+networks:
+  agentlens-net:
+    driver: bridge
+
+volumes:
+  vault-data:
+  postgres-data:
+  grafana-data:
+  prometheus-data:
+  keycloak-data:
+  rabbitmq-data:
+  localstack-data:
+
+services:
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 1. LocalStack — emulates AWS locally
+  #    Tests: S3 Object Lock, KMS, Secrets Manager, SQS DLQ, ECR
+  # ─────────────────────────────────────────────────────────────────────────
+  localstack:
+    image: localstack/localstack:3.4
+    container_name: agentlens-localstack
+    ports:
+      - "4566:4566"        # single gateway for all AWS services
+    environment:
+      SERVICES: s3,kms,secretsmanager,sqs,ecr,iam
+      DEBUG: 0
+      PERSISTENCE: 1
+      DATA_DIR: /var/lib/localstack/data
+      AWS_DEFAULT_REGION: ap-south-1
+      LOCALSTACK_AUTH_TOKEN: ""   # community edition — no token needed
+    volumes:
+      - localstack-data:/var/lib/localstack
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - agentlens-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 10s
+      retries: 5
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 2. HashiCorp Vault — secret management
+  #    Tests: API key storage, rotation, dynamic secrets
+  # ─────────────────────────────────────────────────────────────────────────
+  vault:
+    image: hashicorp/vault:1.17
+    container_name: agentlens-vault
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: "agentlens-dev-token"
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+      VAULT_ADDR: "http://0.0.0.0:8200"
+    cap_add:
+      - IPC_LOCK
+    volumes:
+      - vault-data:/vault/data
+      - ./vault/config.hcl:/vault/config/config.hcl:ro
+      - ./vault/init.sh:/vault/init.sh:ro
+    command: vault server -dev
+    networks:
+      - agentlens-net
+    healthcheck:
+      test: ["CMD", "vault", "status", "-address=http://localhost:8200"]
+      interval: 10s
+      retries: 5
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 3. PostgreSQL — production-grade compliance DB (replaces SQLite)
+  #    Tests: override_rate, rubber_stamp, responsibility_map, migrations
+  # ─────────────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: agentlens-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: agentlens_compliance
+      POSTGRES_USER: agentlens
+      POSTGRES_PASSWORD: agentlens_dev_pw   # change in prod via Vault
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - agentlens-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentlens -d agentlens_compliance"]
+      interval: 5s
+      retries: 10
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 4. OpenTelemetry Collector
+  #    Tests: span ingestion from OTELExporter, fan-out to Jaeger + Prometheus
+  # ─────────────────────────────────────────────────────────────────────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.101.0
+    container_name: agentlens-otel-collector
+    ports:
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+      - "8888:8888"    # Collector self-metrics (Prometheus scrape)
+      - "8889:8889"    # Prometheus exporter for AgentLens spans
+    volumes:
+      - ./otel/collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    depends_on:
+      - jaeger
+    networks:
+      - agentlens-net
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 5. Jaeger — distributed trace visualization
+  #    Tests: end-to-end trace from agent start → decision → WORM write
+  # ─────────────────────────────────────────────────────────────────────────
+  jaeger:
+    image: jaegertracing/all-in-one:1.58
+    container_name: agentlens-jaeger
+    ports:
+      - "16686:16686"  # Jaeger UI → http://localhost:16686
+      - "14250:14250"  # gRPC for OTEL collector → Jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    networks:
+      - agentlens-net
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 6. Prometheus — metrics scraping
+  #    Tests: override_rate metric, guardrail_hits counter, PII firewall rate
+  # ─────────────────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    container_name: agentlens-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=90d"   # RBI wants long retention
+      - "--web.enable-lifecycle"
+    networks:
+      - agentlens-net
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 7. Grafana — dashboards for IT risk team
+  #    Tests: override rate trending, rubber-stamp alerts, guardrail heatmaps
+  # ─────────────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:11.0.0
+    container_name: agentlens-grafana
+    ports:
+      - "3000:3000"    # Grafana UI → http://localhost:3000 (admin/admin)
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "agentlens_dev"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: "grafana-clock-panel"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    networks:
+      - agentlens-net
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 8. Keycloak — OIDC / OAuth2 identity provider
+  #    Tests: JWT auth on the AgentLens FastAPI service, RBAC roles
+  # ─────────────────────────────────────────────────────────────────────────
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: agentlens-keycloak
+    ports:
+      - "8080:8080"    # Keycloak UI → http://localhost:8080 (admin/admin)
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/agentlens_compliance
+      KC_DB_USERNAME: agentlens
+      KC_DB_PASSWORD: agentlens_dev_pw
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+    command: ["start-dev", "--import-realm"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - agentlens-net
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 9. RabbitMQ — dead-letter queue for failed WORM writes
+  #    Tests: S3 outage simulation → event lands in DLQ → retry worker replays
+  # ─────────────────────────────────────────────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: agentlens-rabbitmq
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # Management UI → http://localhost:15672 (guest/guest)
+    environment:
+      RABBITMQ_DEFAULT_USER: agentlens
+      RABBITMQ_DEFAULT_PASS: agentlens_dev
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - ./rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
+    networks:
+      - agentlens-net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      retries: 5
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 10. Fluent Bit — log shipping from NDJSON files to OpenSearch
+  #     Tests: WORM NDJSON files picked up and shipped to queryable store
+  # ─────────────────────────────────────────────────────────────────────────
+  fluent-bit:
+    image: fluent/fluent-bit:3.1
+    container_name: agentlens-fluentbit
+    volumes:
+      - ./fluent-bit/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf:ro
+      - ./fluent-bit/parsers.conf:/fluent-bit/etc/parsers.conf:ro
+      - /tmp/agentlens-audit:/audit-logs:ro   # mount NDJSON output dir
+    depends_on:
+      - opensearch
+    networks:
+      - agentlens-net
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 11. OpenSearch — queryable 7-year audit log store
+  #     Tests: RBI examiner queries, event search, index lifecycle policy
+  # ─────────────────────────────────────────────────────────────────────────
+  opensearch:
+    image: opensearchproject/opensearch:2.14.0
+    container_name: agentlens-opensearch
+    ports:
+      - "9200:9200"
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"    # dev only — enable TLS in prod
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    networks:
+      - agentlens-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -v red"]
+      interval: 15s
+      retries: 10
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.14.0
+    container_name: agentlens-opensearch-dashboards
+    ports:
+      - "5601:5601"    # → http://localhost:5601
+    environment:
+      OPENSEARCH_HOSTS: '["http://opensearch:9200"]'
+      DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
+    depends_on:
+      - opensearch
+    networks:
+      - agentlens-net
