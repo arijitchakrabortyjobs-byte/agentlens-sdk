@@ -34,6 +34,8 @@ from typing import Any, Dict, Generator, List, Optional
 from .config import AgentLensConfig
 from .audit_log import AuditEvent, AuditLog, EventType, RiskTier
 from .policy import PolicyEngine, PolicyCheckResult, PolicyAction
+from .storage import WORMStorageAdapter
+from .otel import OTELExporter
 
 
 class AgentSpan:
@@ -219,10 +221,16 @@ class AuditTracer:
         self,
         config: AgentLensConfig,
         policy_engine: Optional[PolicyEngine] = None,
+        storage_adapter: Optional[WORMStorageAdapter] = None,
+        otel_exporter: Optional[OTELExporter] = None,
     ):
         self.config = config
         self.policy_engine = policy_engine
-        self.audit_log = AuditLog(entity_name=config.entity_name)
+        self.audit_log = AuditLog(
+            entity_name=config.entity_name,
+            storage_adapter=storage_adapter,
+            otel_exporter=otel_exporter,
+        )
 
     @contextmanager
     def trace_agent(self, agent_id: str) -> Generator[AgentSpan, None, None]:

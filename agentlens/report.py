@@ -16,19 +16,33 @@ without additional processing by compliance teams.
 
 import json
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .audit_log import AuditLog, AuditEvent, EventType, RiskTier
 from .config import AgentLensConfig
+from .compliance_db import ComplianceDatabase
 
 
 class ComplianceReporter:
     """Generates regulator-ready compliance reports from the audit log."""
 
-    def __init__(self, audit_log: AuditLog, config: AgentLensConfig):
+    def __init__(
+        self,
+        audit_log: AuditLog,
+        config: AgentLensConfig,
+        compliance_db: Optional[ComplianceDatabase] = None,
+    ):
         self.log = audit_log
         self.config = config
         self._events = audit_log.get_events()
+        self._db = compliance_db
+
+        # Auto-record this session into the compliance DB if one is provided
+        if self._db is not None:
+            try:
+                self._db.record_session(self.log.summary())
+            except Exception:
+                pass
 
     def _events_by_type(self, event_type: EventType) -> List[AuditEvent]:
         return [e for e in self._events if e.event_type == event_type]
@@ -69,11 +83,36 @@ class ComplianceReporter:
             "recommendation": "RBI FREE-AI Rec 25 — Independent Validation",
         }
 
+        # Session-level override rate
+        session_decisions = len(decisions)
+        session_overrides = len(overrides)
+        session_override_rate = (
+            round(session_overrides / session_decisions, 4) if session_decisions else 0.0
+        )
+
+        # Cross-session override rate from ComplianceDatabase if available
+        cross_session_info: Dict[str, Any] = {}
+        if self._db is not None:
+            try:
+                cs = self._db.entity_summary(self.config.entity_name)
+                cross_session_info = {
+                    "total_sessions_tracked": cs.get("total_sessions", 0),
+                    "cross_session_override_rate": cs.get("override_rate", 0.0),
+                    "cross_session_override_rate_pct": cs.get("override_rate_pct", "0.0%"),
+                    "rubber_stamp_sessions_detected": cs.get("rubber_stamp_flag", False),
+                    "rubber_stamp_session_ids": cs.get("rubber_stamp_sessions", []),
+                    "regulatory_ref": "US SR 26-2 effective challenge; UK ICO accountability",
+                }
+            except Exception:
+                cross_session_info = {"error": "ComplianceDatabase query failed"}
+
         # Pillar: Protection — consumer and data protection
         protection_status = {
             "pillar": "Protection (FREE-AI Pillar 5)",
             "pii_masking_enabled": self.config.pii_masking_enabled,
-            "human_overrides_logged": len(overrides),
+            "human_overrides_logged": session_overrides,
+            "session_override_rate": session_override_rate,
+            "cross_session": cross_session_info,
             "override_details": [
                 {
                     "timestamp": o.timestamp_utc,
@@ -117,6 +156,29 @@ class ComplianceReporter:
                 "compliance_flags_raised": sum(len(e.compliance_flags) for e in self._events),
             },
             "chain_integrity_verified": self.log.verify_integrity(),
+        }
+
+    def cross_session_report(self) -> Dict[str, Any]:
+        """
+        Cross-session accountability report using the ComplianceDatabase.
+        Returns human override rates, rubber-stamp detection, and
+        responsibility chain across all recorded sessions for this entity.
+
+        Satisfies:
+          US SR 26-2: effective challenge — override rate as proxy metric
+          UK ICO: controller/processor responsibility chain
+          Singapore MGF Dimension 2: organisational accountability
+        """
+        if self._db is None:
+            return {
+                "error": "No ComplianceDatabase configured. Pass compliance_db= to ComplianceReporter.",
+                "hint": "from agentlens.compliance_db import ComplianceDatabase; db = ComplianceDatabase()",
+            }
+        return {
+            "report_type": "Cross_Session_Accountability",
+            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "entity": self.config.entity_name,
+            **self._db.entity_summary(self.config.entity_name),
         }
 
     def executive_dashboard(self) -> str:

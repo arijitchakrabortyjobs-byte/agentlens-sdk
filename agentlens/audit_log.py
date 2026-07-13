@@ -28,7 +28,11 @@ import uuid
 from datetime import datetime, timezone
 from dataclasses import dataclass, field, asdict
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .storage import WORMStorageAdapter
+    from .otel import OTELExporter
 
 
 class EventType(str, Enum):
@@ -173,18 +177,53 @@ class AuditLog:
     DPDP 2023: Raw PII must not appear in logs — use hashes.
     """
 
-    def __init__(self, entity_name: str):
+    def __init__(
+        self,
+        entity_name: str,
+        storage_adapter: "Optional[WORMStorageAdapter]" = None,
+        otel_exporter: "Optional[OTELExporter]" = None,
+    ):
         self.entity_name = entity_name
         self._events: List[AuditEvent] = []
         self._last_hash = "GENESIS"
+        self._storage = storage_adapter
+        self._otel = otel_exporter
 
     def append(self, event: AuditEvent) -> AuditEvent:
-        """Append an event and chain it to the previous hash."""
+        """Append an event, chain it to the previous hash, then persist."""
         event.previous_event_hash = self._last_hash
-        # Recompute hash with chained previous
         event.event_hash = event._compute_hash()
         self._events.append(event)
         self._last_hash = event.event_hash
+
+        # Persist to WORM storage (non-blocking; errors are recorded but do not
+        # interrupt the audit chain — losing a write is better than losing a decision)
+        if self._storage is not None:
+            try:
+                self._storage.write(event)
+            except Exception as e:
+                # Append a self-describing error event so the gap is visible
+                err = AuditEvent(
+                    trace_id=event.trace_id,
+                    session_id=event.session_id,
+                    event_type=EventType.ERROR,
+                    agent_id=event.agent_id,
+                    risk_tier=event.risk_tier,
+                    error_code="STORAGE_WRITE_FAILED",
+                    error_message=f"{type(self._storage).__name__}: {e}",
+                )
+                err.previous_event_hash = self._last_hash
+                err.event_hash = err._compute_hash()
+                self._events.append(err)
+                self._last_hash = err.event_hash
+
+        # Emit to OTEL if configured
+        if self._otel is not None:
+            try:
+                self._otel.emit(event)
+            except Exception:
+                pass  # OTEL failure must never interrupt the audit trail
+
         return event
 
     def verify_integrity(self) -> bool:
@@ -218,6 +257,8 @@ class AuditLog:
         if not self._events:
             return {"total_events": 0}
         tiers = [e.risk_tier.value for e in self._events]
+        decisions = sum(1 for e in self._events if e.event_type == EventType.DECISION)
+        overrides = sum(1 for e in self._events if e.human_override)
         return {
             "entity": self.entity_name,
             "total_events": len(self._events),
@@ -226,13 +267,10 @@ class AuditLog:
             "guardrails_triggered": sum(
                 1 for e in self._events if e.guardrail_triggered
             ),
-            "human_overrides": sum(
-                1 for e in self._events if e.human_override
-            ),
-            "decisions_recorded": sum(
-                1 for e in self._events
-                if e.event_type == EventType.DECISION
-            ),
+            "human_overrides": overrides,
+            "decisions_recorded": decisions,
+            # Override rate: proxy metric for genuine human engagement (US SR 26-2)
+            "override_rate": round(overrides / decisions, 4) if decisions else 0.0,
             "first_event": self._events[0].timestamp_utc,
             "last_event": self._events[-1].timestamp_utc,
         }

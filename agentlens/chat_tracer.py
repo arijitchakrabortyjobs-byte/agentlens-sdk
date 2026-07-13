@@ -23,6 +23,9 @@ from .audit_log import AuditEvent, AuditLog, EventType, RiskTier
 from .config import AgentLensConfig
 from .policy import PolicyEngine, PolicyCheckResult, PolicyAction
 from .chat_analytics import TurnAnalytics, analyse_turn
+from .pii_firewall import firewall_messages, PIIVault
+from .storage import WORMStorageAdapter
+from .otel import OTELExporter
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -185,6 +188,8 @@ class ChatSessionTracer:
         system_prompt: str = "",
         consent_ref: str = "",
         session_purpose: str = "",
+        storage_adapter: Optional[WORMStorageAdapter] = None,
+        otel_exporter: Optional[OTELExporter] = None,
     ):
         self.config = config
         self.model_card = model_card
@@ -196,7 +201,11 @@ class ChatSessionTracer:
 
         self.session_id = str(uuid.uuid4())
         self.session_start_ms = int(time.time() * 1000)
-        self.audit_log = AuditLog(entity_name=config.entity_name)
+        self.audit_log = AuditLog(
+            entity_name=config.entity_name,
+            storage_adapter=storage_adapter,
+            otel_exporter=otel_exporter,
+        )
         self.turns: List[ConversationTurn] = []
         self._messages: List[Dict] = []  # Raw conversation history for the LLM
 
@@ -267,12 +276,27 @@ class ChatSessionTracer:
         )
         self.audit_log.append(user_event)
 
-        # Call the LLM
+        # ── Pre-model PII firewall ────────────────────────────────────────────
+        # Tokenize PII in the user message BEFORE it leaves this process.
+        # The LLM sees [PAN_1] instead of ABCDE1234F — no PII crosses the wire.
+        # DPDP Act 2023 §8: data minimisation at the point of processing.
         self._messages.append({"role": "user", "content": user_message})
+
+        if self.config.pii_masking_enabled:
+            clean_messages, pii_vault = firewall_messages(
+                self._messages, enabled=True
+            )
+            if pii_vault.token_count > 0:
+                # Record that PII was found and tokenized (types only — not values)
+                turn.pii_fields_masked = pii_vault.pii_types_found
+                turn.pii_detected_in_output = False  # will re-check after response
+        else:
+            clean_messages, pii_vault = self._messages, PIIVault()
+
         turn.request_timestamp_utc_ms = int(time.time() * 1000)
 
         response_text, input_tokens, output_tokens = self.llm_adapter(
-            messages=self._messages,
+            messages=clean_messages,
             system=self.system_prompt,
         )
 
@@ -280,10 +304,17 @@ class ChatSessionTracer:
         turn.latency_ms = turn.response_timestamp_utc_ms - turn.request_timestamp_utc_ms
         turn.input_tokens = input_tokens
         turn.output_tokens = output_tokens
+
+        # Restore PII tokens in response text for user display.
+        # The audit log only ever sees hashes — never restored values.
+        if pii_vault.token_count > 0:
+            response_text = pii_vault.restore(response_text)
+
         turn.assistant_output_hash = self._hash(response_text)
         turn.assistant_output_length = len(response_text)
 
-        # Append to conversation history
+        # Append to conversation history (raw text — kept in-memory for LLM context,
+        # never written to the audit log)
         self._messages.append({"role": "assistant", "content": response_text})
 
         # Run analytics FIRST — reads actual response text.
