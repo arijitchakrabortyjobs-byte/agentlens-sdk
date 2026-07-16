@@ -1,9 +1,15 @@
 # AgentLens — Full E2E Test Environment
 # Spins up real instances of every production system.
-# Run: docker compose -f infra/docker-compose.yml up -d
+#
+# Postgres/Grafana/Keycloak/RabbitMQ passwords are Vault-managed (source of
+# truth: agentlens/* in Vault, seeded by infra/vault/init.sh) — not literals
+# in this file. Bootstrap order:
+#   1. docker compose -f infra/docker-compose.yml up -d vault
+#   2. docker exec agentlens-vault sh /vault/init.sh
+#   3. bash infra/vault/render-env.sh          # writes infra/.env
+#   4. docker compose -f infra/docker-compose.yml --env-file infra/.env up -d
 # Stop: docker compose -f infra/docker-compose.yml down -v
 
-version: "3.9"
 
 networks:
   agentlens-net:
@@ -85,7 +91,7 @@ services:
     environment:
       POSTGRES_DB: agentlens_compliance
       POSTGRES_USER: agentlens
-      POSTGRES_PASSWORD: agentlens_dev_pw   # change in prod via Vault
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run infra/vault/render-env.sh first}
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
@@ -159,9 +165,9 @@ services:
     image: grafana/grafana:11.0.0
     container_name: agentlens-grafana
     ports:
-      - "3000:3000"    # Grafana UI → http://localhost:3000 (admin/admin)
+      - "3000:3000"    # Grafana UI → http://localhost:3000 (admin / see Vault: agentlens/grafana)
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: "agentlens_dev"
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD:?run infra/vault/render-env.sh first}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_INSTALL_PLUGINS: "grafana-clock-panel"
     volumes:
@@ -181,16 +187,17 @@ services:
     image: quay.io/keycloak/keycloak:24.0
     container_name: agentlens-keycloak
     ports:
-      - "8080:8080"    # Keycloak UI → http://localhost:8080 (admin/admin)
+      - "8080:8080"    # Keycloak UI → http://localhost:8080 (admin / see Vault: agentlens/keycloak)
     environment:
       KEYCLOAK_ADMIN: admin
-      KEYCLOAK_ADMIN_PASSWORD: admin
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?run infra/vault/render-env.sh first}
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://postgres:5432/agentlens_compliance
       KC_DB_USERNAME: agentlens
-      KC_DB_PASSWORD: agentlens_dev_pw
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD:?run infra/vault/render-env.sh first}
       KC_HOSTNAME_STRICT: "false"
       KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
     volumes:
       - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
     command: ["start-dev", "--import-realm"]
@@ -209,10 +216,10 @@ services:
     container_name: agentlens-rabbitmq
     ports:
       - "5672:5672"    # AMQP
-      - "15672:15672"  # Management UI → http://localhost:15672 (guest/guest)
+      - "15672:15672"  # Management UI → http://localhost:15672 (agentlens / see Vault: agentlens/rabbitmq)
     environment:
       RABBITMQ_DEFAULT_USER: agentlens
-      RABBITMQ_DEFAULT_PASS: agentlens_dev
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:?run infra/vault/render-env.sh first}
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
       - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
@@ -256,7 +263,7 @@ services:
     networks:
       - agentlens-net
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -v red"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\"\\|\"status\":\"yellow\"'"]
       interval: 15s
       retries: 10
 

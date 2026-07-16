@@ -25,12 +25,20 @@
     {
       "username": "rbi-examiner",
       "enabled": true,
+      "email": "rbi-examiner@agentlens.dev",
+      "emailVerified": true,
+      "firstName": "RBI",
+      "lastName": "Examiner",
       "credentials": [{"type": "password", "value": "examiner123", "temporary": false}],
       "realmRoles": ["agentlens-auditor"]
     },
     {
       "username": "bank-admin",
       "enabled": true,
+      "email": "bank-admin@agentlens.dev",
+      "emailVerified": true,
+      "firstName": "Bank",
+      "lastName": "Admin",
       "credentials": [{"type": "password", "value": "admin123", "temporary": false}],
       "realmRoles": ["agentlens-admin"]
     }

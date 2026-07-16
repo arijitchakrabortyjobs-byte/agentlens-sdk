@@ -6,6 +6,9 @@
 #       AND: bash infra/vault/init.sh
 
 set -e
+export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-test}"
+export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-test}"
+export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-ap-south-1}"
 PASS=0; FAIL=0
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
@@ -28,7 +31,7 @@ echo "=================================="
 # ── 1. LocalStack (AWS emulation) ──────────────────────────────────────────
 section "LocalStack — AWS services"
 check "LocalStack health" \
-  "curl -sf http://localhost:4566/_localstack/health | grep -q '\"s3\": \"available\"'"
+  "curl -sf http://localhost:4566/_localstack/health | grep -q '\"s3\": \"running\"'"
 check "S3 Object Lock bucket exists" \
   "aws --endpoint-url=http://localhost:4566 --region ap-south-1 s3api head-bucket --bucket agentlens-worm-audit"
 check "KMS alias exists" \

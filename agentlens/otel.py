@@ -64,6 +64,7 @@ class OTELExporter:
         self.endpoint = endpoint
         self.service_name = service_name
         self._tracer: Any = None
+        self._provider: Any = None
         self._available = _OTEL_AVAILABLE
         self._init_error: Optional[str] = None
         self._lock = threading.Lock()
@@ -99,6 +100,7 @@ class OTELExporter:
 
             provider.add_span_processor(BatchSpanProcessor(span_exporter))
             trace.set_tracer_provider(provider)
+            self._provider = provider
             self._tracer = trace.get_tracer(service_name)
         except Exception as e:
             self._init_error = str(e)
@@ -180,6 +182,24 @@ class OTELExporter:
                     span.set_status(StatusCode.ERROR, event.error_message or event.error_code)
                 else:
                     span.set_status(StatusCode.OK)
+
+    def flush(self, timeout_millis: int = 5000) -> bool:
+        """
+        Force-flush any spans still sitting in the BatchSpanProcessor buffer.
+        Call this before process exit (or after a burst of events you need
+        delivered immediately) — otherwise spans can be silently lost if the
+        process ends before the processor's periodic export runs.
+        Returns True on success (or if there is nothing to flush).
+        """
+        if not self._available or self._provider is None:
+            return True
+        return self._provider.force_flush(timeout_millis=timeout_millis)
+
+    def shutdown(self) -> None:
+        """Flush pending spans and shut down the tracer provider. Call once at process exit."""
+        if not self._available or self._provider is None:
+            return
+        self._provider.shutdown()
 
     def health_check(self) -> Dict[str, Any]:
         return {

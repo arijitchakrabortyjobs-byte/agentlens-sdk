@@ -27,10 +27,22 @@ CREATE TABLE IF NOT EXISTS responsibility_map (
 );
 
 -- For RBI examiner read-only access (no INSERT/UPDATE/DELETE)
-CREATE ROLE IF NOT EXISTS rbi_examiner;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'rbi_examiner') THEN
+        CREATE ROLE rbi_examiner;
+    END IF;
+END
+$$;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO rbi_examiner;
 
 -- For AgentLens service account
-CREATE ROLE IF NOT EXISTS agentlens_service;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'agentlens_service') THEN
+        CREATE ROLE agentlens_service;
+    END IF;
+END
+$$;
 GRANT SELECT, INSERT, UPDATE ON sessions, responsibility_map TO agentlens_service;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO agentlens_service;

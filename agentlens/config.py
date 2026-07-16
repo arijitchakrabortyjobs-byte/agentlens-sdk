@@ -15,13 +15,15 @@ from enum import Enum
 
 
 class EntityType(str, Enum):
-    """Regulated entity types under RBI jurisdiction (FREE-AI Framework)."""
-    SCB = "Scheduled_Commercial_Bank"
-    NBFC = "NBFC"
-    PAYMENT_OPERATOR = "Payment_System_Operator"
-    FINTECH = "Fintech"
+    """Regulated entity types across supported jurisdictions."""
+    SCB = "Scheduled_Commercial_Bank"             # RBI jurisdiction
+    NBFC = "NBFC"                                 # RBI jurisdiction
+    PAYMENT_OPERATOR = "Payment_System_Operator"  # RBI jurisdiction
+    FINTECH = "Fintech"                           # RBI jurisdiction
     SECURITIES_BROKER = "Securities_Broker"       # SEBI jurisdiction
     ASSET_MANAGER = "Asset_Manager"               # SEBI jurisdiction
+    INSURER = "Insurer"                           # IRDAI jurisdiction
+    HOSPITAL = "Hospital"                         # DISHA / NHA jurisdiction
     OTHER = "Other"
 
 

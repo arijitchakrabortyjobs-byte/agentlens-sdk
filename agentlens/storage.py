@@ -123,6 +123,9 @@ class S3ObjectLockAdapter(WORMStorageAdapter):
             region="ap-south-1",
             retention_years=7,   # RBI MRM: 5yr active + 2yr buffer
         )
+
+    For dev/test against LocalStack, pass endpoint_url (e.g.
+    "http://localhost:4566") plus dummy credentials.
     """
 
     def __init__(
@@ -132,6 +135,7 @@ class S3ObjectLockAdapter(WORMStorageAdapter):
         retention_years: int = 7,
         aws_access_key_id: Optional[str] = None,
         aws_secret_access_key: Optional[str] = None,
+        endpoint_url: Optional[str] = None,
     ):
         self.bucket = bucket
         self.region = region
@@ -145,6 +149,10 @@ class S3ObjectLockAdapter(WORMStorageAdapter):
         if aws_access_key_id:
             self._init_kwargs["aws_access_key_id"] = aws_access_key_id
             self._init_kwargs["aws_secret_access_key"] = aws_secret_access_key
+        if endpoint_url:
+            # Points at a non-AWS S3-compatible endpoint (e.g. LocalStack for
+            # dev/test, or a VPC endpoint in prod).
+            self._init_kwargs["endpoint_url"] = endpoint_url
 
         try:
             import boto3

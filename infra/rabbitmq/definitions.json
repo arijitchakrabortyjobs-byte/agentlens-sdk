@@ -1,5 +1,14 @@
 {
   "vhosts": [{"name": "agentlens"}],
+  "permissions": [
+    {
+      "user": "agentlens",
+      "vhost": "agentlens",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    }
+  ],
   "queues": [
     {
       "name": "audit.worm.main",

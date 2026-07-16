@@ -16,8 +16,10 @@ processors:
 
 exporters:
   # Traces → Jaeger (for visual debugging)
+  # Jaeger's native OTLP ingestion port (COLLECTOR_OTLP_ENABLED=true), not
+  # the legacy Jaeger-protobuf collector port (14250) which doesn't speak OTLP.
   otlp/jaeger:
-    endpoint: jaeger:14250
+    endpoint: jaeger:4317
     tls:
       insecure: true
 

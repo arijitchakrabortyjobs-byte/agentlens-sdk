@@ -85,12 +85,14 @@ def worm_adapter():
 @pytest.fixture
 def otel_exporter():
     from agentlens.otel import OTELExporter
-    return OTELExporter(
+    exporter = OTELExporter(
         endpoint=OTEL_ENDPOINT,
         service_name="agentlens-integration-test",
         use_grpc=True,
         insecure=True,
     )
+    yield exporter
+    exporter.flush()  # BatchSpanProcessor buffers — force delivery before the test ends
 
 
 @pytest.fixture
@@ -105,7 +107,7 @@ def make_config(entity_name, entity_type_str):
     from agentlens.config import EntityType, RegulatoryFramework
     entity_map = {
         "NBFC":      EntityType.NBFC,
-        "BANK":      EntityType.BANK,
+        "BANK":      EntityType.SCB,
         "INSURER":   EntityType.INSURER,
         "HOSPITAL":  EntityType.HOSPITAL,
     }
@@ -197,7 +199,7 @@ class TestBFSIPhase0:
 
         assert tracer.get_log().verify_integrity(), "Audit chain broken — tamper detected"
         summary = tracer.get_log().summary()
-        assert summary["total_events"] == 4  # start + 2 tool calls + decision + end = 5? No: start, tool, tool, decision, end = 5
+        assert summary["total_events"] == 5  # start, tool_call, tool_call, decision, end
         assert summary["chain_intact"] is True
 
     def test_human_override_logged_with_reviewer_hash(self, worm_adapter):
