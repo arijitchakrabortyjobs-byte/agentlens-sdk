@@ -31,9 +31,12 @@ class RegulatoryFramework(str, Enum):
     """Supported Indian regulatory frameworks."""
     RBI_FREE_AI = "RBI_FREE_AI_AUG2025"
     RBI_MRM_2026 = "RBI_Model_Risk_Mgmt_JUNE2026"
+    RBI_DATA_LOCALIZATION = "RBI_Data_Localization_APR2018"
     SEBI_AIML_2025 = "SEBI_AIML_Guidelines_JUNE2025"
     DPDP_2023 = "DPDP_Act_2023"
     IRDAI_AI = "IRDAI_AI_Governance"
+    DISHA_HEALTH = "DISHA_ABDM_Health_Data"
+    MEITY_INDIAAI = "MeitY_IndiaAI_Governance_Guidelines"
 
 
 @dataclass
@@ -82,9 +85,25 @@ class AgentLensConfig:
             EntityType.SECURITIES_BROKER, EntityType.ASSET_MANAGER
         ]
 
+    def is_irdai_regulated(self) -> bool:
+        """IRDAI jurisdiction — insurers and insurance intermediaries."""
+        return self.entity_type == EntityType.INSURER
+
+    def is_health_regulated(self) -> bool:
+        """DISHA / ABDM / NHA jurisdiction — health data fiduciaries."""
+        return self.entity_type == EntityType.HOSPITAL
+
     def requires_board_policy(self) -> bool:
-        """RBI FREE-AI: All REs must have board-approved AI policy."""
-        return self.is_rbi_regulated()
+        """RBI FREE-AI: All REs must have board-approved AI policy.
+
+        IRDAI and SEBI also expect a named-officer-owned AI governance
+        policy for covered entities.
+        """
+        return (
+            self.is_rbi_regulated()
+            or self.is_sebi_regulated()
+            or self.is_irdai_regulated()
+        )
 
     def __post_init__(self):
         if self.requires_board_policy() and not self.board_policy_ref:

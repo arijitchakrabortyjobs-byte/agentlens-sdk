@@ -5,18 +5,42 @@ Runtime policy enforcement and guardrails aligned to Indian regulatory
 frameworks. Checks agent actions against policy rules BEFORE execution,
 producing verifiable why-trails independent of LLM chain-of-thought.
 
-RBI FREE-AI Pillar: Governance + Assurance
+Indian AI-governance coverage in this module:
+
+RBI FREE-AI Framework (Aug 2025):
   - Recommendation 14: Independent model validation
   - Recommendation 18: Bias and explainability checks
   - Recommendation 21: Incident escalation
+  - Recommendation 22/23: Consumer transparency and grievance redressal
 
-RBI MRM June 2026:
+RBI Model Risk Management (June 2026):
   - Kill switch / human override for Tier 1 models
+  - Model inventory and periodic validation
   - Mandatory human-in-the-loop for high-value decisions
 
-SEBI AI/ML June 2025:
+RBI Data Localization (Apr 2018):
+  - Payment / audit data residency within India
+
+SEBI AI/ML (June 2025):
   - Algorithm accountability for securities trading
   - Pre-trade risk controls
+
+DPDP Act 2023:
+  - Consent before processing (S6), purpose limitation (S5/S6)
+  - Data minimisation and security safeguards (S8)
+  - Right to erasure (S8(7)/S12) and grievance redressal (S13)
+  - Children's data — verifiable parental consent (S9)
+  - Breach-notification readiness (S8(6))
+
+IRDAI AI Governance (Working Group, Jun 2026):
+  - Human sign-off on claim denials and adverse underwriting
+  - No demographic proxy variables in premium models
+  - Disclosure of AI use to policyholders
+
+DISHA / ABDM health-data governance:
+  - Physician sign-off on AI clinical recommendations
+  - AI-generated prescriptions blocked (human-only)
+  - Patient consent and identifier tokenization
 """
 
 from dataclasses import dataclass, field
@@ -180,6 +204,128 @@ class RBIPolicy:
             ),
         ]
 
+    @staticmethod
+    def fraud_aml_rules() -> List[PolicyRule]:
+        """
+        Rules for AI agents in fraud / AML monitoring.
+        RBI FREE-AI Rec 21 (incident escalation) + PMLA 2002 + RBI KYC.
+        A suspicious-transaction decision must never be auto-closed by AI.
+        """
+        return [
+            PolicyRule(
+                rule_id="RBI_AML_001",
+                description="Suspicious-transaction flag must escalate to a human — never auto-closed",
+                regulatory_ref="RBI_FREE_AI_REC_21 | PMLA_2002 | RBI_MASTER_KYC_2016",
+                action_on_fail=PolicyAction.ESCALATE,
+                risk_tier_applies=[1],
+                version="1.0",
+                check_fn=lambda ctx: (
+                    (not ctx.get("suspicious_flag", False))
+                    or ctx.get("human_review_requested", False),
+                    "Suspicious flag: "
+                    + ("raised — " if ctx.get("suspicious_flag") else "none — ")
+                    + ("human review requested" if ctx.get("human_review_requested")
+                       else "ESCALATION REQUIRED (no auto-close of STR)"),
+                    {
+                        "suspicious_flag": ctx.get("suspicious_flag", False),
+                        "human_review_requested": ctx.get("human_review_requested", False),
+                    }
+                )
+            ),
+            PolicyRule(
+                rule_id="RBI_AML_002",
+                description="AML decision must reference a versioned AML/KYC policy",
+                regulatory_ref="RBI_MASTER_KYC_2016 | RBI_FREE_AI_REC_14",
+                action_on_fail=PolicyAction.BLOCK,
+                risk_tier_applies=[1, 2],
+                version="1.0",
+                check_fn=lambda ctx: (
+                    bool(ctx.get("policy_ref")),
+                    "AML policy reference: " + str(ctx.get("policy_ref", "MISSING")),
+                    {"policy_ref": ctx.get("policy_ref"), "check": "aml_policy_ref_present"}
+                )
+            ),
+        ]
+
+    @staticmethod
+    def model_governance_rules() -> List[PolicyRule]:
+        """
+        RBI Model Risk Management (June 2026) obligations for Tier 1 models:
+        model inventory, periodic independent validation, and a kill switch.
+        """
+        return [
+            PolicyRule(
+                rule_id="RBI_MRM_001",
+                description="Model must be registered in the institution's model inventory",
+                regulatory_ref="RBI_MRM_2026_MODEL_INVENTORY | RBI_FREE_AI_REC_14",
+                action_on_fail=PolicyAction.WARN,
+                risk_tier_applies=[1, 2],
+                version="1.0",
+                check_fn=lambda ctx: (
+                    bool(ctx.get("model_inventory_ref")),
+                    "Model inventory reference: " + str(ctx.get("model_inventory_ref", "MISSING")),
+                    {"model_inventory_ref": ctx.get("model_inventory_ref")}
+                )
+            ),
+            PolicyRule(
+                rule_id="RBI_MRM_002",
+                description="Tier 1 model must have a validation within the last 365 days",
+                regulatory_ref="RBI_MRM_2026_PERIODIC_VALIDATION",
+                action_on_fail=PolicyAction.ESCALATE,
+                risk_tier_applies=[1],
+                version="1.0",
+                check_fn=lambda ctx: (
+                    ctx.get("days_since_last_validation", 9999) <= 365,
+                    f"Days since last validation: {ctx.get('days_since_last_validation', 'UNKNOWN')} "
+                    + ("(within window)" if ctx.get("days_since_last_validation", 9999) <= 365
+                       else "— REVALIDATION REQUIRED"),
+                    {
+                        "days_since_last_validation": ctx.get("days_since_last_validation"),
+                        "max_days": 365,
+                    }
+                )
+            ),
+            PolicyRule(
+                rule_id="RBI_MRM_003",
+                description="Tier 1 model must expose an operational kill switch",
+                regulatory_ref="RBI_MRM_2026_KILL_SWITCH",
+                action_on_fail=PolicyAction.BLOCK,
+                risk_tier_applies=[1],
+                version="1.0",
+                check_fn=lambda ctx: (
+                    ctx.get("kill_switch_available", False),
+                    "Kill switch: " + ("AVAILABLE" if ctx.get("kill_switch_available")
+                                        else "NOT AVAILABLE — Tier 1 deployment blocked"),
+                    {"kill_switch_available": ctx.get("kill_switch_available", False)}
+                )
+            ),
+        ]
+
+    @staticmethod
+    def data_localization_rules() -> List[PolicyRule]:
+        """
+        RBI data-localization directive (Apr 2018): payment and audit data
+        must be stored on infrastructure located within India.
+        """
+        return [
+            PolicyRule(
+                rule_id="RBI_LOCAL_001",
+                description="Audit/payment data must be stored in an India region",
+                regulatory_ref="RBI_DATA_LOCALIZATION_APR2018",
+                action_on_fail=PolicyAction.BLOCK,
+                risk_tier_applies=[1, 2, 3],
+                version="1.0",
+                check_fn=lambda ctx: (
+                    str(ctx.get("data_region", "")).lower().startswith(("ap-south", "india", "central-india", "south-india")),
+                    "Data region: " + str(ctx.get("data_region", "UNSET"))
+                    + (" (India — compliant)" if str(ctx.get("data_region", "")).lower().startswith(
+                        ("ap-south", "india", "central-india", "south-india"))
+                       else " — NON-COMPLIANT: data must reside in India"),
+                    {"data_region": ctx.get("data_region")}
+                )
+            ),
+        ]
+
 
 class SEBIPolicy:
     """
@@ -221,6 +367,304 @@ class SEBIPolicy:
                         "threshold": 5_000_000,
                         "dual_approval": ctx.get("dual_approval_obtained", False),
                     }
+                )
+            ),
+        ]
+
+
+class DPDPPolicy:
+    """
+    Policy rules for the Digital Personal Data Protection Act, 2023 —
+    India's binding data-protection law. These operate at the agent-decision
+    layer (complementing the conversational checks in chat_policy.py) so that
+    any agent processing personal data of a Data Principal is held to the
+    Act's consent, minimisation, erasure, and grievance obligations.
+    """
+
+    @staticmethod
+    def data_processing_rules() -> List[PolicyRule]:
+        """DPDP Act 2023 data-fiduciary obligations and data-principal rights."""
+        return [
+            PolicyRule(
+                rule_id="DPDP_CONSENT_001",
+                description="Processing requires a consent reference on file for the Data Principal (S6)",
+                regulatory_ref="DPDP_ACT_2023_S6_CONSENT",
+                action_on_fail=PolicyAction.BLOCK,
+                risk_tier_applies=[1, 2, 3],
+                version="1.0",
+                check_fn=lambda ctx: (
+                    bool(ctx.get("consent_ref"))
+                    or ctx.get("legitimate_use", False),
+                    "Consent basis: "
+                    + (f"consent_ref={ctx.get('consent_ref')}" if ctx.get("consent_ref")
+                       else "legitimate use (S7)" if ctx.get("legitimate_use")
+                       else "MISSING — processing blocked (S6)"),
+                    {
+                        "consent_ref": ctx.get("consent_ref"),
+                        "legitimate_use": ctx.get("legitimate_use", False),
+                    }
+                )
+            ),
+            PolicyRule(
+                rule_id="DPDP_PURPOSE_001",
+                description="Processing must be limited to the notified purpose (S5/S6)",
+                regulatory_ref="DPDP_ACT_2023_S5_NOTICE | DPDP_ACT_2023_S6_PURPOSE_LIMITATION",
+                action_on_fail=PolicyAction.BLOCK,
+                risk_tier_applies=[1, 2, 3],
+                version="1.0",
+                check_fn=lambda ctx: (
+                    bool(ctx.get("processing_purpose")),
+                    "Processing purpose: " + str(ctx.get("processing_purpose", "UNSPECIFIED — blocked")),
+                    {"processing_purpose": ctx.get("processing_purpose")}
+                )
+            ),
+            PolicyRule(
+                rule_id="DPDP_MINIMISE_001",
+                description="Personal data must be tokenized/masked before logging (S8 safeguards)",
+                regulatory_ref="DPDP_ACT_2023_S8_DATA_MINIMISATION",
+                action_on_fail=PolicyAction.BLOCK,
+                risk_tier_applies=[1, 2, 3],
+                version="1.0",
+                check_fn=lambda ctx: (
+                    ctx.get("pii_masked", False),
+                    "PII masking: " + ("COMPLIANT" if ctx.get("pii_masked")
+                                       else "NON-COMPLIANT — raw personal data would be logged"),
+                    {"pii_masked": ctx.get("pii_masked", False)}
+                )
+            ),
+            PolicyRule(
+                rule_id="DPDP_ERASURE_001",
+                description="No further processing once erasure is requested / retention has lapsed (S8(7)/S12)",
+                regulatory_ref="DPDP_ACT_2023_S8_7_ERASURE | DPDP_ACT_2023_S12_RIGHT_TO_ERASURE",
+                action_on_fail=PolicyAction.BLOCK,
+                risk_tier_applies=[1, 2, 3],
+                version="1.0",
+                check_fn=lambda ctx: (
+                    not ctx.get("erasure_requested", False),
+                    "Erasure request: "
+                    + ("PRESENT — further processing blocked" if ctx.get("erasure_requested")
+                       else "none on file"),
+                    {"erasure_requested": ctx.get("erasure_requested", False)}
+                )
+            ),
+            PolicyRule(
+                rule_id="DPDP_CHILDREN_001",
+                description="Processing a child's data requires verifiable parental consent (S9)",
+                regulatory_ref="DPDP_ACT_2023_S9_CHILDREN",
+                action_on_fail=PolicyAction.BLOCK,
+                risk_tier_applies=[1, 2, 3],
+                version="1.0",
+                check_fn=lambda ctx: (
+                    (not ctx.get("data_principal_is_child", False))
+                    or ctx.get("parental_consent_verified", False),
+                    "Child data: "
+                    + ("N/A" if not ctx.get("data_principal_is_child")
+                       else "parental consent verified" if ctx.get("parental_consent_verified")
+                       else "VERIFIABLE PARENTAL CONSENT MISSING — blocked"),
+                    {
+                        "data_principal_is_child": ctx.get("data_principal_is_child", False),
+                        "parental_consent_verified": ctx.get("parental_consent_verified", False),
+                    }
+                )
+            ),
+            PolicyRule(
+                rule_id="DPDP_GRIEVANCE_001",
+                description="A grievance-redressal / DPO channel must be reachable (S13)",
+                regulatory_ref="DPDP_ACT_2023_S13_GRIEVANCE_REDRESSAL",
+                action_on_fail=PolicyAction.WARN,
+                risk_tier_applies=[1, 2, 3],
+                version="1.0",
+                check_fn=lambda ctx: (
+                    bool(ctx.get("grievance_channel_ref") or ctx.get("dpo_contact_ref")),
+                    "Grievance/DPO channel: "
+                    + str(ctx.get("grievance_channel_ref") or ctx.get("dpo_contact_ref", "NOT CONFIGURED")),
+                    {
+                        "grievance_channel_ref": ctx.get("grievance_channel_ref"),
+                        "dpo_contact_ref": ctx.get("dpo_contact_ref"),
+                    }
+                )
+            ),
+            PolicyRule(
+                rule_id="DPDP_BREACH_001",
+                description="A breach-notification procedure reference must be on file (S8(6))",
+                regulatory_ref="DPDP_ACT_2023_S8_6_BREACH_NOTIFICATION",
+                action_on_fail=PolicyAction.WARN,
+                risk_tier_applies=[1, 2, 3],
+                version="1.0",
+                check_fn=lambda ctx: (
+                    bool(ctx.get("breach_procedure_ref")),
+                    "Breach-notification procedure: " + str(ctx.get("breach_procedure_ref", "NOT CONFIGURED")),
+                    {"breach_procedure_ref": ctx.get("breach_procedure_ref")}
+                )
+            ),
+        ]
+
+
+class IRDAIPolicy:
+    """
+    Policy rules for AI in insurance, aligned to the mandate of the IRDAI
+    AI Working Group (constituted June 2026): ethical, transparent and
+    explainable AI in claims management, underwriting and fraud detection,
+    with human accountability for adverse decisions.
+    """
+
+    @staticmethod
+    def claims_underwriting_rules() -> List[PolicyRule]:
+        """Rules for AI agents in claims, underwriting and insurance fraud."""
+        return [
+            PolicyRule(
+                rule_id="IRDAI_CLAIM_001",
+                description="AI claim denial requires human sign-off before it is issued",
+                regulatory_ref="IRDAI_AI_WG_JUN2026 | IRDAI_PPHI_POLICYHOLDER_PROTECTION",
+                action_on_fail=PolicyAction.ESCALATE,
+                risk_tier_applies=[1],
+                version="1.0",
+                check_fn=lambda ctx: (
+                    (ctx.get("decision") != "deny")
+                    or ctx.get("human_review_requested", False),
+                    "Claim decision: " + str(ctx.get("decision", "n/a"))
+                    + (" — human sign-off present" if ctx.get("human_review_requested")
+                       else " — DENIAL REQUIRES HUMAN SIGN-OFF" if ctx.get("decision") == "deny"
+                       else ""),
+                    {
+                        "decision": ctx.get("decision"),
+                        "human_review_requested": ctx.get("human_review_requested", False),
+                    }
+                )
+            ),
+            PolicyRule(
+                rule_id="IRDAI_UW_001",
+                description="Underwriting/premium models must not use demographic proxy variables",
+                regulatory_ref="IRDAI_AI_WG_JUN2026_FAIRNESS",
+                action_on_fail=PolicyAction.BLOCK,
+                risk_tier_applies=[1, 2],
+                version="1.0",
+                check_fn=lambda ctx: (
+                    not ctx.get("uses_demographic_proxy", False),
+                    "Demographic proxy variables: "
+                    + ("PRESENT — blocked (unfair discrimination)" if ctx.get("uses_demographic_proxy")
+                       else "none detected"),
+                    {"uses_demographic_proxy": ctx.get("uses_demographic_proxy", False)}
+                )
+            ),
+            PolicyRule(
+                rule_id="IRDAI_FRAUD_001",
+                description="AI fraud flag must escalate to a human before any claim rejection",
+                regulatory_ref="IRDAI_AI_WG_JUN2026 | RBI_FREE_AI_REC_21",
+                action_on_fail=PolicyAction.ESCALATE,
+                risk_tier_applies=[1],
+                version="1.0",
+                check_fn=lambda ctx: (
+                    (not ctx.get("fraud_flag", False))
+                    or ctx.get("human_review_requested", False),
+                    "Fraud flag: "
+                    + ("raised — " if ctx.get("fraud_flag") else "none — ")
+                    + ("human review requested" if ctx.get("human_review_requested")
+                       else "ESCALATION REQUIRED"),
+                    {
+                        "fraud_flag": ctx.get("fraud_flag", False),
+                        "human_review_requested": ctx.get("human_review_requested", False),
+                    }
+                )
+            ),
+            PolicyRule(
+                rule_id="IRDAI_DISCLOSE_001",
+                description="Use of AI in the decision must be disclosed to the policyholder",
+                regulatory_ref="IRDAI_AI_WG_JUN2026_TRANSPARENCY",
+                action_on_fail=PolicyAction.WARN,
+                risk_tier_applies=[1, 2, 3],
+                version="1.0",
+                check_fn=lambda ctx: (
+                    ctx.get("ai_disclosed_to_user", False),
+                    "AI disclosure to policyholder: "
+                    + ("DONE" if ctx.get("ai_disclosed_to_user") else "MISSING"),
+                    {"ai_disclosed": ctx.get("ai_disclosed_to_user", False)}
+                )
+            ),
+        ]
+
+
+class DISHAPolicy:
+    """
+    Policy rules for AI on health data, aligned to India's ABDM Health Data
+    Management Policy and the draft DISHA framework: patient consent,
+    identifier protection, mandatory physician oversight of AI clinical
+    recommendations, and a hard block on AI-generated prescriptions.
+    """
+
+    @staticmethod
+    def clinical_rules() -> List[PolicyRule]:
+        """Rules for AI agents in clinical decision support and health data."""
+        return [
+            PolicyRule(
+                rule_id="DISHA_CONSENT_001",
+                description="Patient consent reference required before processing health data",
+                regulatory_ref="ABDM_HDM_POLICY_CONSENT | DISHA_DRAFT | DPDP_ACT_2023_S6",
+                action_on_fail=PolicyAction.BLOCK,
+                risk_tier_applies=[1, 2, 3],
+                version="1.0",
+                check_fn=lambda ctx: (
+                    bool(ctx.get("consent_ref")),
+                    "Patient consent: " + str(ctx.get("consent_ref", "MISSING — processing blocked")),
+                    {"consent_ref": ctx.get("consent_ref")}
+                )
+            ),
+            PolicyRule(
+                rule_id="DISHA_PII_001",
+                description="Patient identifiers (ABHA ID, phone, MRN) must be tokenized before logging",
+                regulatory_ref="ABDM_HDM_POLICY_MINIMISATION | DPDP_ACT_2023_S8",
+                action_on_fail=PolicyAction.BLOCK,
+                risk_tier_applies=[1, 2, 3],
+                version="1.0",
+                check_fn=lambda ctx: (
+                    ctx.get("pii_masked", False),
+                    "Patient-identifier masking: "
+                    + ("COMPLIANT" if ctx.get("pii_masked") else "NON-COMPLIANT — identifiers exposed"),
+                    {"pii_masked": ctx.get("pii_masked", False)}
+                )
+            ),
+            PolicyRule(
+                rule_id="DISHA_CDS_001",
+                description="AI clinical recommendation requires a physician's sign-off",
+                regulatory_ref="DISHA_DRAFT_CLINICIAN_OVERSIGHT | ABDM_HDM_POLICY",
+                action_on_fail=PolicyAction.ESCALATE,
+                risk_tier_applies=[1],
+                version="1.0",
+                check_fn=lambda ctx: (
+                    ctx.get("physician_signoff", False),
+                    "Physician sign-off: "
+                    + ("PRESENT" if ctx.get("physician_signoff")
+                       else "MISSING — clinical recommendation must be reviewed by a physician"),
+                    {"physician_signoff": ctx.get("physician_signoff", False)}
+                )
+            ),
+            PolicyRule(
+                rule_id="DISHA_RX_001",
+                description="AI-generated prescriptions are blocked — prescribing is human-only",
+                regulatory_ref="DISHA_DRAFT_HUMAN_ONLY_PRESCRIBING",
+                action_on_fail=PolicyAction.BLOCK,
+                risk_tier_applies=[1, 2, 3],
+                version="1.0",
+                check_fn=lambda ctx: (
+                    not ctx.get("is_ai_prescription", False),
+                    "Prescription source: "
+                    + ("AI-GENERATED — blocked (human-only)" if ctx.get("is_ai_prescription")
+                       else "human / not a prescription"),
+                    {"is_ai_prescription": ctx.get("is_ai_prescription", False)}
+                )
+            ),
+            PolicyRule(
+                rule_id="DISHA_DISCLOSE_001",
+                description="AI involvement must be disclosed to the patient",
+                regulatory_ref="DISHA_DRAFT_TRANSPARENCY | ABDM_HDM_POLICY",
+                action_on_fail=PolicyAction.WARN,
+                risk_tier_applies=[1, 2, 3],
+                version="1.0",
+                check_fn=lambda ctx: (
+                    ctx.get("ai_disclosed_to_user", False),
+                    "AI disclosure to patient: "
+                    + ("DONE" if ctx.get("ai_disclosed_to_user") else "MISSING"),
+                    {"ai_disclosed": ctx.get("ai_disclosed_to_user", False)}
                 )
             ),
         ]

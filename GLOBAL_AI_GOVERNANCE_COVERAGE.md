@@ -127,6 +127,34 @@ The following capabilities are implemented in AgentLens v0.1.0 and drive the cov
 
 ---
 
+## Addendum — Expanded Indian Rule Sets (v0.2.x)
+
+The agent-decision policy layer (`agentlens/policy.py`) has been extended to cover
+the Indian AI-governance stack end-to-end, complementing the conversational checks
+in `chat_policy.py`:
+
+- **RBI FREE-AI / MRM** — added `RBIPolicy.fraud_aml_rules()` (STR never auto-closed;
+  versioned AML policy), `RBIPolicy.model_governance_rules()` (model inventory,
+  ≤365-day validation window, Tier-1 kill switch), and
+  `RBIPolicy.data_localization_rules()` (India-region residency, Apr 2018 directive).
+- **DPDP Act 2023** — new `DPDPPolicy.data_processing_rules()` enforcing consent (S6),
+  purpose limitation (S5/S6), data minimisation (S8), right to erasure (S8(7)/S12),
+  children's data (S9), grievance/DPO channel (S13), and breach-notification
+  readiness (S8(6)).
+- **IRDAI (insurance)** — new `IRDAIPolicy.claims_underwriting_rules()`: human sign-off
+  on claim denials, no demographic proxy variables in underwriting, fraud-flag
+  escalation, and AI-use disclosure to policyholders.
+- **DISHA / ABDM (health)** — new `DISHAPolicy.clinical_rules()`: patient consent,
+  identifier tokenization, physician sign-off on AI clinical recommendations,
+  a hard block on AI-generated prescriptions, and AI-use disclosure to patients.
+
+`config.py` adds the `RBI_DATA_LOCALIZATION`, `DISHA_HEALTH`, and `MEITY_INDIAAI`
+frameworks plus `is_irdai_regulated()` / `is_health_regulated()` entity helpers.
+The three universal gaps below (Agent Identity, Action Scope, Accountability Chain)
+remain the next build phase.
+
+---
+
 ## The Three Universal Gaps
 
 These gaps appear as ○ across nearly every framework. They represent the next required build phase.
