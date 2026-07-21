@@ -8,7 +8,7 @@
 
 ## Why This Matters
 
-No country has passed a law written *specifically* for agentic AI yet. AgentLens is being built ahead of the regulatory curve — but the curve is moving fast. This document maps where the current codebase already satisfies emerging global standards, and where the three universal gaps are.
+No country has passed a law written *specifically* for agentic AI yet. AgentLens is being built ahead of the regulatory curve — but the curve is moving fast. This document maps where the current codebase already satisfies emerging global standards, and where the remaining universal gaps are (Agent Identity and Action Scope — the original third gap, Accountability Chain, has since been closed).
 
 ---
 
@@ -62,6 +62,12 @@ Eight dimensions were assessed. Each is mapped to at least one major regulatory 
 | F · Agent Identity | ◐ | ◐ | ○ | ○ | ○ | — | ○ | ◐ | ◐ | ○ |
 | G · Action Scope | ○ | ○ | ◐ | ○ | ○ | — | ○ | ○ | ○ | ○ |
 | H · Accountability Chain | ○ | ○ | ○ | ○ | ○ | ◐ | ○ | ○ | ◐ | ◐ |
+
+> **Matrix note:** This grid and the scores below are the **v0.1.0 baseline**. Since then,
+> **Dimension H (Accountability Chain) has been implemented** in `compliance_db.py` — read it
+> as ✅ for Singapore MGF, US SR 26-2, and UK ICO, and ◐ for the rest — and the Indian rule
+> sets have deepened D/E coverage (see the [Addendum](#addendum--expanded-indian-rule-sets-v02x)).
+> The baseline marks are left unrecomputed to keep the historical snapshot intact.
 
 ---
 
@@ -150,14 +156,20 @@ in `chat_policy.py`:
 
 `config.py` adds the `RBI_DATA_LOCALIZATION`, `DISHA_HEALTH`, and `MEITY_INDIAAI`
 frameworks plus `is_irdai_regulated()` / `is_health_regulated()` entity helpers.
-The three universal gaps below (Agent Identity, Action Scope, Accountability Chain)
-remain the next build phase.
+
+Of the three universal gaps originally flagged below, **one — the Accountability
+Chain (Dimension H) — is now closed** in `compliance_db.py` (cross-session override
+rate, rubber-stamp detection, and the developer → platform → deployer → user
+`ResponsibilityMap`). **Agent Identity (F)** and **Action Scope (G)** remain the
+next build phase.
 
 ---
 
-## The Three Universal Gaps
+## The Universal Gaps
 
-These gaps appear as ○ across nearly every framework. They represent the next required build phase.
+Three gaps were originally flagged as ○ across nearly every framework. **Gap 3
+(Accountability Chain) has since been implemented** (see below); **Gaps 1 and 2
+(Agent Identity, Action Scope) remain** the next required build phase.
 
 ### Gap 1 — Agent Identity (Dimension F)
 
@@ -207,21 +219,26 @@ class ActionRecord:
 
 ---
 
-### Gap 3 — Accountability Chain (Dimension H)
+### Gap 3 — Accountability Chain (Dimension H) — ✅ CLOSED
 
-**What is missing:** No cross-session override rate tracking, no developer→platform→deployer→user responsibility chain, and no value chain mapping.
+**Status:** Implemented in `compliance_db.py` (`ComplianceDatabase`). The three items
+originally flagged here are now in code:
 
-`AuditLog.summary()` counts `human_overrides` within a single session but does not compute an override rate or flag rubber-stamping patterns.
+- **Cross-session override rate** — `override_rate(entity_name)` computes overrides ÷
+  total decisions across all sessions for an entity.
+- **Rubber-stamp detection** — `rubber_stamp_sessions(entity_name)` flags sessions
+  where the human reviewer never overrode the AI (`override_rate == 0.0`).
+- **Responsibility chain** — `set_responsibility_map()` / `get_responsibility_map()`
+  record the developer → platform → deployer → end-user chain per entity, each with a
+  role and contractual reference.
+- `entity_summary()` bundles these into a single report and maps them to the driving
+  frameworks (US SR 26-2 effective challenge, UK ICO controller/processor, Singapore
+  MGF Dimension 2).
 
-**Why frameworks require it:**
+**Why frameworks required it:**
 - US SR 26-2: "effective challenge" requires evidence that human reviewers are genuinely engaging with AI recommendations — override rate is a proxy metric
 - UK ICO: controller/processor distinction must be documented across the full AI supply chain
 - Singapore MGF Dimension 2: human accountability must be tracked at both individual and organisational level
-
-**What needs to be built:**
-- Cross-session `human_override_rate` metric (overrides ÷ total decisions)
-- `ResponsibilityMap`: developer, platform, deployer, end-user — each with role and contractual reference
-- Rubber-stamp detection: flag sessions where human reviewers never override (`override_rate == 0.0` across N sessions)
 
 ---
 
@@ -255,7 +272,7 @@ AgentLens also encodes weights implicitly in its guardrail architecture:
 
 2. **India is the tightest jurisdiction.** RBI FREE-AI, RBI MRM 2026, SEBI, and DPDP collectively constitute the most detailed binding obligations for AI agents in financial services globally. AgentLens was built for this stack.
 
-3. **The three gaps are universal.** Agent Identity, Action Scope Classification, and Accountability Chain appear as gaps across every framework. These are not India-specific — they are what the next wave of regulation will require globally.
+3. **The remaining gaps are universal.** Agent Identity and Action Scope Classification appear as gaps across every framework — not India-specific, but what the next wave of regulation will require globally. (Accountability Chain, originally the third universal gap, has since been implemented in `compliance_db.py`.)
 
 4. **US SR 26-2 explicitly excludes agentic AI.** The US banking regulators (Fed/OCC/FDIC) drew a line: SR 26-2 covers traditional ML models only. Agentic AI is out of scope. This is the most significant policy gap in global AI governance today.
 
@@ -272,8 +289,8 @@ Based on the coverage gaps and weighting analysis:
 | P1 | Action Scope Classification for `AgentSpan` | SEBI (BLOCK threshold), China CAC | v0.3.0 |
 | P1 | Tool call logging in `ChatSessionTracer` | Singapore MGF Dim 3, NIST CAISI | v0.3.0 |
 | P2 | Agent Identity fingerprint + capability manifest | Singapore MGF, UAE DIFC, NIST CAISI | v0.4.0 |
-| P2 | Cross-session override rate tracking | US SR 26-2, UK ICO | v0.4.0 |
-| P3 | Responsibility chain / value chain mapping | UK ICO, Singapore MGF Dim 2 | v0.5.0 |
+| ~~P2~~ ✅ | ~~Cross-session override rate tracking~~ — **done** (`compliance_db.py`) | US SR 26-2, UK ICO | v0.2.0 |
+| ~~P3~~ ✅ | ~~Responsibility chain / value chain mapping~~ — **done** (`compliance_db.py`) | UK ICO, Singapore MGF Dim 2 | v0.2.0 |
 | P3 | China PIPL PII pattern support (ID, WeChat, etc.) | China CAC / PIPL | v0.5.0 |
 | P4 | Training data lineage documentation (EU AI Act Annex IV) | EU AI Act (deadline Dec 2027) | v1.0.0 |
 
